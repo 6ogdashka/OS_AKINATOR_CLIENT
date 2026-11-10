@@ -1,4 +1,3 @@
-// mainwindow.cpp — реализация GUI-клиента (раздел 8 ТЗ).
 #include "mainwindow.h"
 
 #include <QDialog>
@@ -7,7 +6,6 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
-#include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -20,24 +18,20 @@
 #include <QVBoxLayout>
 
 #include <cstddef>
-#include <vector>
 
 #include "connection.h"
 #include "gamecore/gamecore.h"
+#include "protocol.h"
 
 namespace {
-
 constexpr int kConnectPage = 0;
 constexpr int kSecretPage = 1;
 constexpr int kGamePage = 2;
 
-// Размеры иллюстраций состояний (PNG в client/assets, подключены через .qrc).
 constexpr int kStateImageSide = 264;
 constexpr int kConnectImageSide = 190;
 constexpr int kSecretImageSide = 132;
 
-// Иллюстрация состояния: idle — ожидание, think — думают над вопросом,
-// happy — победа, hard — поражение.
 QPixmap loadStatePixmap(const QString& name, int side)
 {
     QPixmap pixmap(QStringLiteral(":/assets/state_%1.png").arg(name));
@@ -56,8 +50,6 @@ QLabel* makeImageLabel(QWidget* parent, const QString& name, int side)
     return label;
 }
 
-// Подсветка ошибки в статусной строке: меняем динамическое свойство и
-// переполировываем виджет, чтобы сработал селектор QLabel[error="true"] из QSS.
 void setErrorStyle(QLabel* label, bool error)
 {
     if (!label || label->property("error").toBool() == error) {
@@ -68,8 +60,6 @@ void setErrorStyle(QLabel* label, bool error)
     label->style()->polish(label);
 }
 
-// Текст ошибки подключения с подсказкой: самая частая причина отказа — в поле
-// остался 127.0.0.1, хотя сервер запущен на другом компьютере.
 QString connectionErrorMessage(const QString& raw, const QString& endpoint)
 {
     if (raw.contains(QStringLiteral("refused"), Qt::CaseInsensitive)) {
@@ -90,7 +80,6 @@ QString connectionErrorMessage(const QString& raw, const QString& endpoint)
     return raw;
 }
 
-// Скрыть элементы списка, не содержащие подстроку поиска (без учёта регистра).
 void filterList(QListWidget* list, const QString& text)
 {
     const QString needle = text.trimmed();
@@ -101,7 +90,6 @@ void filterList(QListWidget* list, const QString& text)
     }
 }
 
-// Число элементов, видимых с учётом текущего фильтра поиска.
 int visibleItemCount(QListWidget* list)
 {
     int visible = 0;
@@ -112,8 +100,7 @@ int visibleItemCount(QListWidget* list)
     }
     return visible;
 }
-
-} // namespace
+}
 
 MainWindow::MainWindow(Connection* connection, const QString& host, int port,
                        const QString& envWarning, QWidget* parent)
@@ -134,19 +121,8 @@ MainWindow::MainWindow(Connection* connection, const QString& host, int port,
         portField_->setEnabled(false);
         connectStatusLabel_->setText(QStringLiteral("Подключение установлено, ждём приветствия…"));
     });
-    connect(connection_, &Connection::welcome, this, &MainWindow::onWelcome);
-    connect(connection_, &Connection::start, this, &MainWindow::onStart);
-    connect(connection_, &Connection::turnChanged, this, &MainWindow::onTurnChanged);
-    connect(connection_, &Connection::answerReceived, this, &MainWindow::onAnswer);
-    connect(connection_, &Connection::hintStatusReceived, this, &MainWindow::onHintStatus);
-    connect(connection_, &Connection::opponentAsked, this, &MainWindow::onOpponentAsked);
-    connect(connection_, &Connection::candidatesReceived, this, &MainWindow::onCandidates);
-    connect(connection_, &Connection::removeOk, this, &MainWindow::onRemoveOk);
-    connect(connection_, &Connection::guessResult, this, &MainWindow::onGuessResult);
-    connect(connection_, &Connection::matchOver, this, &MainWindow::onMatchOver);
-    connect(connection_, &Connection::serverError, this, &MainWindow::onServerError);
-    connect(connection_, &Connection::opponentDisconnected, this,
-            &MainWindow::onOpponentDisconnected);
+    connect(connection_, &Connection::messageReceived, this, &MainWindow::onMessage);
+    connect(connection_, &Connection::errorOccurred, this, &MainWindow::onServerError);
     connect(connection_, &Connection::connectionClosed, this, &MainWindow::onConnectionClosed);
 
     resetGameData();
@@ -154,6 +130,81 @@ MainWindow::MainWindow(Connection* connection, const QString& host, int port,
 }
 
 MainWindow::~MainWindow() = default;
+
+void MainWindow::onMessage(const QStringList& parts)
+{
+    if (parts.isEmpty()) {
+        return;
+    }
+
+    const QString command = parts[0];
+    if (command == QLatin1String("WELCOME")) {
+        int player = 0;
+        if (proto::readInt(parts, 1, &player)) {
+            onWelcome(player);
+        }
+    } else if (command == QLatin1String("START")) {
+        onStart();
+    } else if (command == QLatin1String("TURN")) {
+        int player = 0;
+        if (proto::readInt(parts, 1, &player)) {
+            onTurnChanged(player);
+        }
+    } else if (command == QLatin1String("ANSWER")) {
+        int questionId = -1;
+        int remaining = 0;
+        if (parts.size() < 4 || !proto::readInt(parts, 1, &questionId)
+            || !proto::readInt(parts, 3, &remaining)) {
+            appendLog(QStringLiteral("Некорректное сообщение ANSWER"));
+            return;
+        }
+        const QString hintKind = parts.size() >= 6 ? parts.at(4) : QString();
+        const double hintMetric = parts.size() >= 6 ? parts.at(5).toDouble() : 0.0;
+        onAnswer(questionId, parts.at(2), remaining, hintKind, hintMetric);
+    } else if (command == QLatin1String("HINTS")) {
+        int variance = 0;
+        int randomForest = 0;
+        int catBoost = 0;
+        if (proto::readInt(parts, 1, &variance) && proto::readInt(parts, 2, &randomForest)
+            && proto::readInt(parts, 3, &catBoost)) {
+            onHintStatus(variance, randomForest, catBoost);
+        }
+    } else if (command == QLatin1String("OPPONENT")) {
+        int questionId = -1;
+        if (parts.size() >= 3 && proto::readInt(parts, 1, &questionId)) {
+            onOpponentAsked(questionId, parts.at(2));
+        }
+    } else if (command == QLatin1String("CANDIDATES")) {
+        QList<int> ids;
+        for (int i = 1; i < parts.size(); ++i) {
+            bool ok = false;
+            const int id = parts.at(i).toInt(&ok);
+            if (ok) {
+                ids.append(id);
+            }
+        }
+        onCandidates(ids);
+    } else if (command == QLatin1String("REMOVED")) {
+        int remaining = 0;
+        if (proto::readInt(parts, 1, &remaining)) {
+            onRemoveOk(remaining);
+        }
+    } else if (command == QLatin1String("WRONG")) {
+        onGuessResult();
+    } else if (command == QLatin1String("OVER")) {
+        int winner = 0;
+        int characterId = -1;
+        if (proto::readInt(parts, 1, &winner) && proto::readInt(parts, 2, &characterId)) {
+            onMatchOver(winner, characterId);
+        }
+    } else if (command == QLatin1String("ERROR")) {
+        onServerError(parts.mid(1).join(QLatin1Char(' ')));
+    } else if (command == QLatin1String("OPPONENT_LEFT")) {
+        onOpponentDisconnected(parts.mid(1).join(QLatin1Char(' ')));
+    } else {
+        appendLog(QStringLiteral("Неизвестное сообщение сервера: %1").arg(command));
+    }
+}
 
 void MainWindow::buildUi()
 {
@@ -184,7 +235,7 @@ QWidget* MainWindow::buildConnectPage()
     subtitle->setAlignment(Qt::AlignCenter);
     subtitle->setWordWrap(true);
 
-    connectImage_ = makeImageLabel(page, QStringLiteral("idle"), kConnectImageSide);
+    auto* connectImage = makeImageLabel(page, QStringLiteral("idle"), kConnectImageSide);
 
     hostField_ = new QLineEdit(page);
     hostField_->setPlaceholderText(QStringLiteral("127.0.0.1"));
@@ -218,7 +269,7 @@ QWidget* MainWindow::buildConnectPage()
     cardLayout->setSpacing(12);
     cardLayout->addWidget(title);
     cardLayout->addWidget(subtitle);
-    cardLayout->addWidget(connectImage_, 0, Qt::AlignHCenter);
+    cardLayout->addWidget(connectImage, 0, Qt::AlignHCenter);
     cardLayout->addLayout(form);
     cardLayout->addSpacing(4);
     cardLayout->addWidget(connectButton_);
@@ -247,7 +298,7 @@ QWidget* MainWindow::buildSecretPage()
     subtitle->setObjectName(QStringLiteral("pageSubtitle"));
     subtitle->setWordWrap(true);
 
-    secretImage_ = makeImageLabel(page, QStringLiteral("think"), kSecretImageSide);
+    auto* secretImage = makeImageLabel(page, QStringLiteral("think"), kSecretImageSide);
 
     searchField_ = new QLineEdit(page);
     searchField_->setObjectName(QStringLiteral("searchField"));
@@ -278,7 +329,7 @@ QWidget* MainWindow::buildSecretPage()
 
     auto* header = new QHBoxLayout;
     header->setSpacing(16);
-    header->addWidget(secretImage_);
+    header->addWidget(secretImage);
     header->addLayout(headerText, 1);
 
     auto* card = new QFrame(page);
@@ -314,8 +365,6 @@ QWidget* MainWindow::buildGamePage()
     statusLabel_->setObjectName(QStringLiteral("statusLabel"));
     statusLabel_->setWordWrap(true);
 
-    // Свой персонаж всегда на виду: игрок часто забывает, кого загадал, а спросить
-    // об этом больше негде — секрет хранится только на сервере.
     mySecretLabel_ = new QLabel(page);
     mySecretLabel_->setObjectName(QStringLiteral("mySecretLabel"));
     mySecretLabel_->setWordWrap(true);
@@ -363,7 +412,6 @@ QWidget* MainWindow::buildGamePage()
     auto* logTitle = new QLabel(QStringLiteral("Журнал партии"), page);
     logTitle->setObjectName(QStringLiteral("pageSubtitle"));
 
-    // Левая колонка — иллюстрация состояния и статистика.
     auto* avatarCard = new QFrame(page);
     avatarCard->setObjectName(QStringLiteral("cardHighlight"));
     avatarCard->setFixedWidth(300);
@@ -377,7 +425,6 @@ QWidget* MainWindow::buildGamePage()
     avatarLayout->addWidget(hintsLabel_);
     avatarLayout->addStretch();
 
-    // Правая колонка — статус, действия и журнал.
     auto* buttons = new QGridLayout;
     buttons->setSpacing(10);
     buttons->addWidget(askButton_, 0, 0, 1, 2);
@@ -420,8 +467,6 @@ QWidget* MainWindow::buildGamePage()
     return page;
 }
 
-// --- Состояния ------------------------------------------------------------
-
 void MainWindow::applyState(UiState state)
 {
     state_ = state;
@@ -448,8 +493,7 @@ void MainWindow::applyState(UiState state)
     const bool inGame = myTurn || state == UiState::WaitResult
                         || state == UiState::OpponentTurn;
     const bool matchOver = state == UiState::MatchOver;
-    // Раздел 8 ТЗ: «таблица/угадать» видны в свой ход и во время ожидания ответа
-    // (заблокированы), а в ход соперника — скрыты.
+
     const bool candidatesActionsVisible = myTurn || state == UiState::WaitResult;
 
     askButton_->setVisible(inGame);
@@ -462,8 +506,7 @@ void MainWindow::applyState(UiState state)
     leaveButton_->setVisible(inGame || matchOver);
 
     askButton_->setEnabled(myTurn);
-    // Подсказки: по одной каждого вида на партию и не две подряд — между ними
-    // нужен обычный вопрос или догадка (сервер проверяет это же правило).
+
     const bool hintsAllowed = myTurn && !hintUsedLastTurn_;
     hintVarianceButton_->setEnabled(hintsAllowed && hintsLeftVariance_ > 0);
     hintRandomForestButton_->setEnabled(hintsAllowed && hintsLeftRandomForest_ > 0);
@@ -518,7 +561,7 @@ void MainWindow::updateTurnStatus()
         statusLabel_->clear();
         break;
     }
-    // Любая смена состояния снимает подсветку ошибки.
+
     setErrorStyle(statusLabel_, false);
 }
 
@@ -526,11 +569,9 @@ void MainWindow::resetGameData()
 {
     askedQuestions_.clear();
     pending_ = PendingRequest::None;
-    currentTurn_ = 0;
     waitingAnswer_ = false;
     hintUsedLastTurn_ = false;
-    // Секрет выбирается заново на каждом welcome/реванше: сервер сбрасывает
-    // лобби при отключении, поэтому старый выбор уже недействителен.
+
     mySecretId_ = -1;
     candidatesCount_ = gamecore::kCharacterCount;
     hintsLeftVariance_ = 1;
@@ -577,8 +618,6 @@ void MainWindow::updateMySecretLabel()
                                               "про него.").arg(name));
 }
 
-// --- Подключение ----------------------------------------------------------
-
 void MainWindow::onConnectClicked()
 {
     QString host = hostField_->text().trimmed();
@@ -595,7 +634,6 @@ void MainWindow::onConnectClicked()
 
 void MainWindow::onConnectionClosed()
 {
-    // При неудачном подключении текст ошибки уже показан в onServerError.
     if (state_ != UiState::Connecting && state_ != UiState::Disconnected) {
         connectStatusLabel_->setText(QStringLiteral("Соединение с сервером закрыто"));
     }
@@ -638,9 +676,8 @@ void MainWindow::onConfirmSecretClicked()
     }
 
     const int id = item->data(Qt::UserRole).toInt();
-    connection_->send(proto::makeSetSecret(id));
+    connection_->send(QStringLiteral("SECRET"), {QString::number(id)});
 
-    // Запоминаем свой секрет локально: сервер обратно его не присылает.
     mySecretId_ = id;
     updateMySecretLabel();
 
@@ -651,11 +688,8 @@ void MainWindow::onConfirmSecretClicked()
         QStringLiteral("Загадан «%1». Ожидание второго игрока…").arg(item->text()));
 }
 
-// --- Игровые события ------------------------------------------------------
-
-void MainWindow::onStart(const QStringList& players)
+void MainWindow::onStart()
 {
-    currentTurn_ = 0;
     waitingAnswer_ = false;
     hintUsedLastTurn_ = false;
     candidatesCount_ = gamecore::kCharacterCount;
@@ -664,12 +698,9 @@ void MainWindow::onStart(const QStringList& players)
     hintsLeftCatBoost_ = 1;
 
     logText_->clear();
-    appendLog(QStringLiteral("Партия начинается: %1 против %2.")
-                  .arg(players.value(0, QStringLiteral("Player 1")),
-                       players.value(1, QStringLiteral("Player 2"))));
+    appendLog(QStringLiteral("Партия начинается."));
     appendLog(QStringLiteral("Вы — игрок %1.").arg(localPlayer_));
-    // Напоминаем секрет и в журнале: подпись слева всегда под рукой, но журнал
-    // прокручивается вместе с историей вопросов.
+
     if (mySecretId_ >= 0) {
         appendLog(QStringLiteral("Вы загадали «%1» — соперник угадывает именно его.")
                       .arg(characterName(mySecretId_)));
@@ -680,49 +711,47 @@ void MainWindow::onStart(const QStringList& players)
 
 void MainWindow::onTurnChanged(int player)
 {
-    currentTurn_ = player;
     waitingAnswer_ = false;
     appendLog(player == localPlayer_ ? QStringLiteral("— Ваш ход —")
                                      : QStringLiteral("— Ход соперника —"));
     applyState(player == localPlayer_ ? UiState::MyTurn : UiState::OpponentTurn);
 }
 
-void MainWindow::onAnswer(const proto::Message& message)
+void MainWindow::onAnswer(int questionId, const QString& answer, int remaining,
+                          const QString& hintKind, double hintMetric)
 {
     waitingAnswer_ = false;
-    askedQuestions_.insert(message.questionId);
-    candidatesCount_ = message.remaining;
-    // Подсказку нельзя использовать два хода подряд: обычный вопрос снимает запрет.
-    hintUsedLastTurn_ = message.hasHint;
+    askedQuestions_.insert(questionId);
+    candidatesCount_ = remaining;
 
-    const QString question = questionText(message.questionId);
-    const QString answer = answerText(message.answer);
+    hintUsedLastTurn_ = !hintKind.isEmpty();
 
-    if (message.hasHint) {
-        const QJsonObject hint = message.raw.value(QStringLiteral("hint")).toObject();
+    const QString question = questionText(questionId);
+    const QString answerTextValue = answerText(answer);
+
+    if (!hintKind.isEmpty()) {
         appendLog(QStringLiteral("Подсказка «%1» (metric %2): «%3» → %4. "
                                  "Сервер убрал неподходящих, в таблице %5. Следующая "
                                  "подсказка — только после обычного вопроса.")
-                      .arg(hint.value(QStringLiteral("kind")).toString())
-                      .arg(hint.value(QStringLiteral("metric")).toDouble(), 0, 'f', 3)
-                      .arg(question, answer)
-                      .arg(message.remaining));
+                      .arg(hintKind)
+                      .arg(hintMetric, 0, 'f', 3)
+                      .arg(question, answerTextValue)
+                      .arg(remaining));
     } else {
-        // Ответ авторитетный: сервер сам вычищает неподходящих из таблицы.
         appendLog(QStringLiteral("Вы спросили «%1» → %2. Сервер убрал неподходящих, "
                                  "в таблице %3 кандидатов.")
-                      .arg(question, answer)
-                      .arg(message.remaining));
+                      .arg(question, answerTextValue)
+                      .arg(remaining));
     }
 
     applyState(UiState::OpponentTurn);
 }
 
-void MainWindow::onHintStatus(const QJsonObject& hintsLeft)
+void MainWindow::onHintStatus(int variance, int randomForest, int catBoost)
 {
-    hintsLeftVariance_ = hintsLeft.value(QStringLiteral("variance")).toInt();
-    hintsLeftRandomForest_ = hintsLeft.value(QStringLiteral("randomforest")).toInt();
-    hintsLeftCatBoost_ = hintsLeft.value(QStringLiteral("catboost")).toInt();
+    hintsLeftVariance_ = variance;
+    hintsLeftRandomForest_ = randomForest;
+    hintsLeftCatBoost_ = catBoost;
     applyState(state_);
 }
 
@@ -745,7 +774,7 @@ void MainWindow::onCandidates(const QList<int>& characterIds)
     } else if (pending == PendingRequest::Guess) {
         const int chosen = guessDialog(characterIds);
         if (chosen >= 0) {
-            connection_->send(proto::makeGuess(chosen));
+            connection_->send(QStringLiteral("GUESS"), {QString::number(chosen)});
             waitingAnswer_ = true;
             applyState(UiState::WaitResult);
         }
@@ -759,22 +788,20 @@ void MainWindow::onRemoveOk(int remaining)
     appendLog(QStringLiteral("Убрано вручную, осталось %1 кандидатов").arg(remaining));
 }
 
-void MainWindow::onGuessResult(bool correct)
+void MainWindow::onGuessResult()
 {
     waitingAnswer_ = false;
-    hintUsedLastTurn_ = false; // догадка — не подсказка, запрет снят
-    if (correct) {
-        return; // при верной догадке сервер сразу шлёт matchover
-    }
+    hintUsedLastTurn_ = false;
     appendLog(QStringLiteral("Неверная догадка — ход переходит к сопернику."));
     applyState(UiState::OpponentTurn);
 }
 
-void MainWindow::onMatchOver(int winner, int characterId, const QString& character)
+void MainWindow::onMatchOver(int winner, int characterId)
 {
     waitingAnswer_ = false;
     const bool won = winner == localPlayer_;
     lastMatchWon_ = won;
+    const QString character = characterName(characterId);
 
     if (won) {
         appendLog(QStringLiteral("Победа! Соперник загадал «%1» (#%2).")
@@ -805,8 +832,6 @@ void MainWindow::onServerError(const QString& text)
         return;
     }
 
-    // Сервер отклоняет запрос, не меняя ход (раздел 7 ТЗ): возвращаем себе
-    // управление, иначе клиент навсегда остался бы в «Ожидание ответа».
     pending_ = PendingRequest::None;
     waitingAnswer_ = false;
     if (state_ == UiState::WaitResult) {
@@ -820,13 +845,10 @@ void MainWindow::onOpponentDisconnected(const QString& text)
 {
     appendLog(QStringLiteral("Соперник отключился: %1").arg(text));
     connectStatusLabel_->setText(text);
-    // Сервер закрывает и наше соединение: блокируем игровые действия, чтобы
-    // не отправлять запросы в уже мёртвый сокет.
+
     applyState(UiState::WaitResult);
     statusLabel_->setText(QStringLiteral("Противник отключился"));
 }
-
-// --- Диалоги --------------------------------------------------------------
 
 int MainWindow::askQuestionDialog()
 {
@@ -915,12 +937,11 @@ void MainWindow::openTableDialog(const QList<int>& characterIds)
         if (selected.isEmpty()) {
             return;
         }
-        std::vector<int> ids;
-        ids.reserve(static_cast<std::size_t>(selected.size()));
+        QStringList ids;
         for (const QListWidgetItem* item : selected) {
-            ids.push_back(item->data(Qt::UserRole).toInt());
+            ids << QString::number(item->data(Qt::UserRole).toInt());
         }
-        connection_->send(proto::makeRemove(ids));
+        connection_->send(QStringLiteral("REMOVE"), ids);
         for (QListWidgetItem* item : selected) {
             delete list->takeItem(list->row(item));
         }
@@ -986,32 +1007,32 @@ void MainWindow::onAskClicked()
     if (questionId < 0) {
         return;
     }
-    connection_->send(proto::makeQuestion(questionId));
+    connection_->send(QStringLiteral("ASK"), {QString::number(questionId)});
     waitingAnswer_ = true;
     applyState(UiState::WaitResult);
 }
 
 void MainWindow::onVarianceClicked()
 {
-    requestHint(proto::HintKind::Variance);
+    requestHint(QStringLiteral("variance"));
 }
 
 void MainWindow::onRandomForestClicked()
 {
-    requestHint(proto::HintKind::RandomForest);
+    requestHint(QStringLiteral("randomforest"));
 }
 
 void MainWindow::onCatBoostClicked()
 {
-    requestHint(proto::HintKind::CatBoost);
+    requestHint(QStringLiteral("catboost"));
 }
 
-void MainWindow::requestHint(proto::HintKind kind)
+void MainWindow::requestHint(const QString& kind)
 {
     if (state_ != UiState::MyTurn || waitingAnswer_) {
         return;
     }
-    connection_->send(proto::makeHint(kind));
+    connection_->send(QStringLiteral("HINT"), {kind});
     waitingAnswer_ = true;
     applyState(UiState::WaitResult);
 }
@@ -1022,7 +1043,7 @@ void MainWindow::onTableClicked()
         return;
     }
     pending_ = PendingRequest::Table;
-    connection_->send(proto::makeGetCandidates());
+    connection_->send(QStringLiteral("TABLE"));
 }
 
 void MainWindow::onGuessClicked()
@@ -1031,12 +1052,12 @@ void MainWindow::onGuessClicked()
         return;
     }
     pending_ = PendingRequest::Guess;
-    connection_->send(proto::makeGetCandidates());
+    connection_->send(QStringLiteral("TABLE"));
 }
 
 void MainWindow::onRematchClicked()
 {
-    connection_->send(proto::makeRematch());
+    connection_->send(QStringLiteral("REMATCH"));
     resetGameData();
 
     searchField_->clear();
@@ -1049,13 +1070,11 @@ void MainWindow::onRematchClicked()
 
 void MainWindow::onLeaveClicked()
 {
-    connection_->send(proto::makeLeave());
+    connection_->send(QStringLiteral("LEAVE"));
     connection_->disconnectFromServer();
     connectStatusLabel_->setText(QStringLiteral("Вы вышли из игры"));
     applyState(UiState::Disconnected);
 }
-
-// --- Вспомогательные функции ---------------------------------------------
 
 QString MainWindow::characterName(int id)
 {
@@ -1077,4 +1096,3 @@ QString MainWindow::answerText(const QString& answer)
 {
     return answer == QStringLiteral("yes") ? QStringLiteral("Да") : QStringLiteral("Нет");
 }
-

@@ -1,4 +1,3 @@
-// gamecore.cpp — данные, фильтрация кандидатов и три детерминированные подсказки.
 #include "gamecore/gamecore.h"
 
 #include "data.h"
@@ -12,7 +11,6 @@
 
 namespace gamecore {
 namespace {
-
 constexpr std::size_t kCell(CharacterId character, QuestionId question) {
     return static_cast<std::size_t>(character) * static_cast<std::size_t>(kQuestionCount)
          + static_cast<std::size_t>(question);
@@ -22,14 +20,13 @@ bool validCharacter(CharacterId id) { return id >= 0 && id < kCharacterCount; }
 bool validQuestion(QuestionId id) { return id >= 0 && id < kQuestionCount; }
 
 bool answeredYes(CharacterId character, QuestionId question) {
-    return generated::kMatrix[kCell(character, question)] > 0;
+    return data::kMatrix[kCell(character, question)] > 0;
 }
 
 bool isExcluded(const std::vector<QuestionId>& excluded, QuestionId question) {
     return std::find(excluded.begin(), excluded.end(), question) != excluded.end();
 }
 
-// Приводит набор к контракту: отсортирован, без повторов, только валидные индексы.
 CandidateSet normalized(const CandidateSet& candidates) {
     CandidateSet out;
     out.reserve(candidates.size());
@@ -66,11 +63,6 @@ HintResult bestByImportance(const std::vector<double>& importance,
     return best;
 }
 
-// --- Условная цель для ML-подсказок ---------------------------------------
-// В игре нет разметки «кто именно загадан», поэтому для оценки важности
-// вопросов строится детерминированная псевдо-цель: класс 1 получают кандидаты
-// с числом ответов «да» выше медианы по текущему набору. Вопросы, которые
-// хорошо объясняют эту цель, информативны и для сужения набора.
 std::vector<int> popularityLabels(const CandidateSet& candidates, bool* usable) {
     const std::size_t n = candidates.size();
     std::vector<int> counts(n, 0);
@@ -106,7 +98,6 @@ double giniImpurity(std::size_t positives, std::size_t total) {
     return 2.0 * p * (1.0 - p);
 }
 
-// --- Random Forest ---------------------------------------------------------
 void rfGrow(const CandidateSet& candidates,
             const std::vector<int>& labels,
             const std::vector<std::size_t>& node,
@@ -126,12 +117,11 @@ void rfGrow(const CandidateSet& candidates,
         positives += static_cast<std::size_t>(labels[pos]);
     }
     if (positives == 0 || positives == total) {
-        return; // узел чистый
+        return;
     }
 
     const double parentImpurity = giniImpurity(positives, total);
 
-    // Случайное подмножество признаков без повторов (детерминированный rng).
     std::vector<QuestionId> subset(features);
     const std::size_t take = std::min(mtry, subset.size());
     for (std::size_t i = 0; i < take; ++i) {
@@ -174,7 +164,6 @@ void rfGrow(const CandidateSet& candidates,
         return;
     }
 
-    // Важность = взвешенное по числу наблюдений падение Gini-примеси.
     importance[static_cast<std::size_t>(bestFeature)] += bestGain * static_cast<double>(total);
 
     std::vector<std::size_t> yesNode;
@@ -193,7 +182,6 @@ void rfGrow(const CandidateSet& candidates,
     rfGrow(candidates, labels, noNode, depth + 1, features, mtry, importance, rng);
 }
 
-// --- CatBoost-подобный бустинг --------------------------------------------
 double sigmoid(double x) {
     if (x >= 0.0) {
         const double e = std::exp(-x);
@@ -287,20 +275,19 @@ void catGrow(const CandidateSet& candidates,
     catGrow(candidates, gradient, hessian, noNode, depth + 1, features, lambda,
             learningRate, raw, importance);
 }
+}
 
-} // namespace
+const std::vector<std::string>& characterNames() { return data::kCharacterNames; }
 
-const std::vector<std::string>& characterNames() { return generated::kCharacterNames; }
+const std::vector<std::string>& questionTexts() { return data::kQuestionTexts; }
 
-const std::vector<std::string>& questionTexts() { return generated::kQuestionTexts; }
-
-const std::vector<std::int8_t>& matrix() { return generated::kMatrix; }
+const std::vector<std::int8_t>& matrix() { return data::kMatrix; }
 
 int value(CharacterId character, QuestionId question) {
     if (!validCharacter(character) || !validQuestion(question)) {
         return 0;
     }
-    return static_cast<int>(generated::kMatrix[kCell(character, question)]);
+    return static_cast<int>(data::kMatrix[kCell(character, question)]);
 }
 
 CandidateSet filterCandidates(const CandidateSet& candidates, QuestionId question,
@@ -363,17 +350,16 @@ HintResult hintRandomForest(const CandidateSet& candidates,
     bool usable = false;
     const std::vector<int> labels = popularityLabels(remaining, &usable);
     if (!usable) {
-        return hintVariance(remaining, excluded); // нет сигнала — базовая подсказка
+        return hintVariance(remaining, excluded);
     }
 
     std::vector<double> importance(kQuestionCount, 0.0);
-    std::mt19937 rng(0x5EED1234u); // фиксированный seed → детерминизм
+    std::mt19937 rng(0x5EED1234u);
     constexpr int kTrees = 40;
     const std::size_t mtry = std::max<std::size_t>(2, features.size() / 3);
     std::uniform_int_distribution<std::size_t> pick(0, remaining.size() - 1);
 
     for (int tree = 0; tree < kTrees; ++tree) {
-        // bootstrap-выборка наблюдений
         std::vector<std::size_t> sample;
         sample.reserve(remaining.size());
         for (std::size_t i = 0; i < remaining.size(); ++i) {
@@ -441,5 +427,4 @@ HintResult hintCatBoost(const CandidateSet& candidates,
     }
     return best;
 }
-
-} // namespace gamecore
+}

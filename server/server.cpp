@@ -1,24 +1,15 @@
-// server.cpp — реализация авторитетного сервера.
 #include "server.h"
 
+#include "protocol.h"
+
 #include <QDebug>
-#include <QJsonValue>
 
 #include <algorithm>
 #include <numeric>
 
-// Пределы протокола и игрового ядра должны совпадать: числа в NDJSON-валидации
-// (common/protocol.h) обязаны соответствовать размеру данных gamecore.
-static_assert(proto::kCharacterCount == gamecore::kCharacterCount,
-              "protocol::kCharacterCount расходится с gamecore::kCharacterCount");
-static_assert(proto::kQuestionCount == gamecore::kQuestionCount,
-              "protocol::kQuestionCount расходится с gamecore::kQuestionCount");
-
 namespace {
-
-constexpr int kHintsPerKind = 1; // по одной подсказке каждого вида (раздел 7 ТЗ)
-
-} // namespace
+constexpr int kHintsPerKind = 1;
+}
 
 Server::Server(QObject* parent)
     : QObject(parent)
@@ -41,11 +32,6 @@ bool Server::start(quint16 port, const QHostAddress& address)
                              .arg(server_.serverAddress().toString())
                              .arg(server_.serverPort());
     return true;
-}
-
-quint16 Server::port() const
-{
-    return server_.serverPort();
 }
 
 int Server::slotOf(const QTcpSocket* socket) const
@@ -71,7 +57,7 @@ bool Server::bothConnected() const
     return players_[0].socket != nullptr && players_[1].socket != nullptr;
 }
 
-void Server::send(int slot, const QJsonObject& message)
+void Server::send(int slot, const QStringList& parts)
 {
     if (slot < 0 || slot >= kPlayerCount) {
         return;
@@ -80,14 +66,14 @@ void Server::send(int slot, const QJsonObject& message)
     if (!player.socket) {
         return;
     }
-    player.socket->write(proto::toLine(message));
+    player.socket->write(proto::makeLine(parts));
     player.socket->flush();
 }
 
-void Server::broadcast(const QJsonObject& message)
+void Server::broadcast(const QStringList& parts)
 {
     for (int i = 0; i < kPlayerCount; ++i) {
-        send(i, message);
+        send(i, parts);
     }
 }
 
@@ -96,26 +82,26 @@ void Server::sendError(int slot, const QString& text)
     qWarning().noquote() << QStringLiteral("Ошибка игроку %1: %2")
                                 .arg(slot + 1)
                                 .arg(text);
-    send(slot, proto::makeError(text));
+    send(slot, {QStringLiteral("ERROR"), text});
 }
 
 void Server::sendHintStatus(int slot)
 {
     const Player& player = players_[slot];
-    send(slot, proto::makeHintStatus(player.hintsLeft.value(QStringLiteral("variance"), 0),
-                                     player.hintsLeft.value(QStringLiteral("randomforest"), 0),
-                                     player.hintsLeft.value(QStringLiteral("catboost"), 0)));
+    send(slot, {QStringLiteral("HINTS"),
+                QString::number(player.hintsVariance),
+                QString::number(player.hintsRandomForest),
+                QString::number(player.hintsCatBoost)});
 }
 
 void Server::beginWaitingSecrets()
 {
-    // Секреты (hasSecret/secret) намеренно не сбрасываются: игрок вправе загадать
-    // персонажа сразу после welcome, ещё до подключения второго игрока.
-    // После реванша секреты очищает clearSecrets().
     for (Player& player : players_) {
         player.candidates.clear();
         player.asked.clear();
-        player.hintsLeft.clear();
+        player.hintsVariance = 0;
+        player.hintsRandomForest = 0;
+        player.hintsCatBoost = 0;
         player.lastTurnWasHint = false;
         player.wantsRematch = false;
     }
@@ -153,17 +139,16 @@ void Server::startMatch()
     for (Player& player : players_) {
         player.candidates = all;
         player.asked.clear();
-        player.hintsLeft.insert(QStringLiteral("variance"), kHintsPerKind);
-        player.hintsLeft.insert(QStringLiteral("randomforest"), kHintsPerKind);
-        player.hintsLeft.insert(QStringLiteral("catboost"), kHintsPerKind);
+        player.hintsVariance = kHintsPerKind;
+        player.hintsRandomForest = kHintsPerKind;
+        player.hintsCatBoost = kHintsPerKind;
         player.lastTurnWasHint = false;
         player.wantsRematch = false;
     }
 
-    const QStringList names = {QStringLiteral("Player 1"), QStringLiteral("Player 2")};
     for (int slot = 0; slot < kPlayerCount; ++slot) {
-        send(slot, proto::makeStart(names));
-        send(slot, proto::makeTurn(turn_));
+        send(slot, {QStringLiteral("START")});
+        send(slot, {QStringLiteral("TURN"), QString::number(turn_)});
         sendHintStatus(slot);
     }
 
@@ -171,7 +156,6 @@ void Server::startMatch()
                              .arg(turn_)
                              .arg(players_[0].candidates.size());
 }
-
 void Server::onNewConnection()
 {
     while (server_.hasPendingConnections()) {
@@ -186,7 +170,8 @@ void Server::onNewConnection()
         }
 
         if (slot < 0) {
-            socket->write(proto::toLine(proto::makeError(QStringLiteral("Сервер занят"))));
+            socket->write(proto::makeLine(
+                {QStringLiteral("ERROR"), QStringLiteral("Сервер занят")}));
             socket->flush();
             socket->disconnectFromHost();
             socket->deleteLater();
@@ -202,7 +187,7 @@ void Server::onNewConnection()
         connect(socket, &QTcpSocket::readyRead, this, &Server::onReadyRead);
         connect(socket, &QTcpSocket::disconnected, this, &Server::onDisconnected);
 
-        send(slot, proto::makeWelcome(player.id));
+        send(slot, {QStringLiteral("WELCOME"), QString::number(player.id)});
         qInfo().noquote() << QStringLiteral("Игрок %1 подключился (%2:%3)")
                                  .arg(player.id)
                                  .arg(socket->peerAddress().toString())
@@ -230,27 +215,23 @@ void Server::onReadyRead()
     players_[slot].buffer.append(socket->readAll());
 
     if (players_[slot].buffer.size() > proto::kMaxLineBytes) {
-        // '\n' так и не пришёл: рвём соединение, иначе буфер растёт бесконечно.
         sendError(slot, QStringLiteral("Слишком длинное сообщение"));
         players_[slot].buffer.clear();
         socket->disconnectFromHost();
         return;
     }
 
-    const QStringList lines = proto::splitFramedLines(&players_[slot].buffer);
+    const QStringList lines = proto::takeLines(&players_[slot].buffer);
     for (const QString& line : lines) {
         const int current = slotOf(socket);
         if (current < 0) {
-            return; // соединение уже сброшено
+            return;
         }
 
-        proto::Message message;
-        QString error;
-        if (!proto::parseMessage(line.toUtf8(), &message, &error)) {
-            sendError(current, error);
-            continue;
+        const QStringList parts = proto::parseLine(line);
+        if (!parts.isEmpty()) {
+            handleMessage(current, parts);
         }
-        handleMessage(current, message);
     }
 }
 
@@ -275,7 +256,8 @@ void Server::dropLobby(int closingSlot)
     QTcpSocket* survivor = players_[other].socket;
 
     if (survivor) {
-        send(other, proto::makeOpponentDisconnected(QStringLiteral("Противник отключился")));
+        send(other, {QStringLiteral("OPPONENT_LEFT"),
+                     QStringLiteral("Противник отключился")});
     }
 
     state_ = State::Lobby;
@@ -298,36 +280,50 @@ void Server::dropLobby(int closingSlot)
     qInfo().noquote() << QStringLiteral("Лобби сброшено, сервер ждёт новых игроков");
 }
 
-void Server::handleMessage(int slot, const proto::Message& message)
+void Server::handleMessage(int slot, const QStringList& parts)
 {
-    switch (message.type) {
-    case proto::Type::SetSecret:
-        handleSetSecret(slot, message);
-        break;
-    case proto::Type::Question:
-        handleQuestion(slot, message.questionId);
-        break;
-    case proto::Type::Hint:
-        handleHint(slot, message.hintKind);
-        break;
-    case proto::Type::GetCandidates:
+    if (parts.isEmpty()) {
+        return;
+    }
+
+    const QString command = parts[0];
+    if (command == QLatin1String("SECRET")) {
+        int characterId = -1;
+        if (!proto::readInt(parts, 1, &characterId)) {
+            sendError(slot, QStringLiteral("Команда SECRET требует characterId"));
+            return;
+        }
+        handleSetSecret(slot, characterId);
+    } else if (command == QLatin1String("ASK")) {
+        int questionId = -1;
+        if (!proto::readInt(parts, 1, &questionId)) {
+            sendError(slot, QStringLiteral("Команда ASK требует questionId"));
+            return;
+        }
+        handleQuestion(slot, questionId);
+    } else if (command == QLatin1String("HINT")) {
+        if (parts.size() < 2) {
+            sendError(slot, QStringLiteral("Команда HINT требует вид подсказки"));
+            return;
+        }
+        handleHint(slot, parts[1]);
+    } else if (command == QLatin1String("TABLE")) {
         handleGetCandidates(slot);
-        break;
-    case proto::Type::Remove:
-        handleRemove(slot, message);
-        break;
-    case proto::Type::Guess:
-        handleGuess(slot, message.characterId);
-        break;
-    case proto::Type::Rematch:
+    } else if (command == QLatin1String("REMOVE")) {
+        handleRemove(slot, parts);
+    } else if (command == QLatin1String("GUESS")) {
+        int characterId = -1;
+        if (!proto::readInt(parts, 1, &characterId)) {
+            sendError(slot, QStringLiteral("Команда GUESS требует characterId"));
+            return;
+        }
+        handleGuess(slot, characterId);
+    } else if (command == QLatin1String("REMATCH")) {
         handleRematch(slot);
-        break;
-    case proto::Type::Leave:
+    } else if (command == QLatin1String("LEAVE")) {
         handleLeave(slot);
-        break;
-    default:
-        sendError(slot, QStringLiteral("Сервер не принимает сообщение этого типа"));
-        break;
+    } else {
+        sendError(slot, QStringLiteral("Неизвестная команда: %1").arg(command));
     }
 }
 
@@ -361,7 +357,7 @@ bool Server::isAsked(int slot, int questionId) const
     return std::find(asked.begin(), asked.end(), questionId) != asked.end();
 }
 
-void Server::handleSetSecret(int slot, const proto::Message& message)
+void Server::handleSetSecret(int slot, int characterId)
 {
     Player& player = players_[slot];
 
@@ -373,12 +369,12 @@ void Server::handleSetSecret(int slot, const proto::Message& message)
         sendError(slot, QStringLiteral("Персонаж уже загадан"));
         return;
     }
-    if (message.characterId < 0 || message.characterId >= gamecore::kCharacterCount) {
+    if (characterId < 0 || characterId >= gamecore::kCharacterCount) {
         sendError(slot, QStringLiteral("Недопустимый characterId"));
         return;
     }
 
-    player.secret = message.characterId;
+    player.secret = characterId;
     player.hasSecret = true;
     qInfo().noquote() << QStringLiteral("Игрок %1 загадал персонажа #%2 (%3)")
                              .arg(player.id)
@@ -402,41 +398,47 @@ void Server::handleQuestion(int slot, int questionId)
         sendError(slot, QStringLiteral("Этот вопрос уже задан"));
         return;
     }
-    players_[slot].lastTurnWasHint = false; // обычный вопрос «разрешает» подсказку
-    applyQuestion(slot, questionId, QJsonObject());
+    players_[slot].lastTurnWasHint = false;
+    applyQuestion(slot, questionId, QString(), 0.0);
 }
 
-void Server::handleHint(int slot, proto::HintKind kind)
+void Server::handleHint(int slot, const QString& kind)
 {
     if (!ensureTurn(slot)) {
         return;
     }
 
     Player& player = players_[slot];
-    const QString key = proto::hintKindToString(kind);
-    if (player.hintsLeft.value(key, 0) <= 0) {
-        sendError(slot, QStringLiteral("Подсказка «%1» уже использована").arg(key));
+
+    int* left = nullptr;
+    if (kind == QLatin1String("variance")) {
+        left = &player.hintsVariance;
+    } else if (kind == QLatin1String("randomforest")) {
+        left = &player.hintsRandomForest;
+    } else if (kind == QLatin1String("catboost")) {
+        left = &player.hintsCatBoost;
+    } else {
+        sendError(slot, QStringLiteral("Неизвестная подсказка: %1").arg(kind));
+        return;
+    }
+
+    if (*left <= 0) {
+        sendError(slot, QStringLiteral("Подсказка «%1» уже использована").arg(kind));
         return;
     }
     if (player.lastTurnWasHint) {
-        // Раздел 7 ТЗ: подсказки не подряд — между ними нужен обычный ход
-        // (вопрос или угадывание), иначе ими можно вычистить таблицу за три хода.
         sendError(slot, QStringLiteral("Подсказку нельзя использовать два хода подряд — "
                                        "сначала задайте обычный вопрос или угадайте"));
         return;
     }
 
     gamecore::HintResult result;
-    switch (kind) {
-    case proto::HintKind::Variance:
+    if (kind == QLatin1String("variance")) {
         result = gamecore::hintVariance(player.candidates, player.asked);
-        break;
-    case proto::HintKind::RandomForest:
+    } else if (kind == QLatin1String("randomforest")) {
         result = gamecore::hintRandomForest(player.candidates, player.asked);
-        break;
-    case proto::HintKind::CatBoost:
+    } else {
         result = gamecore::hintCatBoost(player.candidates, player.asked);
-        break;
     }
 
     if (result.question < 0) {
@@ -444,23 +446,20 @@ void Server::handleHint(int slot, proto::HintKind kind)
         return;
     }
 
-    player.hintsLeft.insert(key, player.hintsLeft.value(key) - 1);
+    --(*left);
     player.lastTurnWasHint = true;
 
-    const QJsonObject hint = proto::makeHintInfo(key, result.score);
     qInfo().noquote() << QStringLiteral("Игрок %1 использует подсказку %2 -> вопрос #%3 (score %4)")
                              .arg(player.id)
-                             .arg(key)
+                             .arg(kind)
                              .arg(result.question)
                              .arg(result.score);
 
-    // Сначала сообщаем обновлённый остаток подсказок, затем применяем вопрос:
-    // порядок у спрашивающего hint_status -> answer -> turn.
     sendHintStatus(slot);
-    applyQuestion(slot, result.question, hint);
+    applyQuestion(slot, result.question, kind, result.score);
 }
 
-void Server::applyQuestion(int slot, int questionId, const QJsonObject& hint)
+void Server::applyQuestion(int slot, int questionId, const QString& hintKind, double metric)
 {
     Player& player = players_[slot];
     const Player& opponent = players_[opponentSlot(slot)];
@@ -469,14 +468,22 @@ void Server::applyQuestion(int slot, int questionId, const QJsonObject& hint)
     const QString answer = yes ? QStringLiteral("yes") : QStringLiteral("no");
 
     player.asked.push_back(questionId);
-    // Ответ авторитетный, поэтому сервер сам сокращает набор кандидатов — и для
-    // обычного вопроса, и для подсказки: игроку не нужно чистить таблицу руками.
+
     player.candidates =
         gamecore::filterCandidates(player.candidates, questionId, yes ? 1 : -1);
 
-    send(slot, proto::makeAnswer(questionId, answer,
-                                 static_cast<int>(player.candidates.size()), hint));
-    send(opponentSlot(slot), proto::makeOpponentAsked(questionId, answer));
+    QStringList response{QStringLiteral("ANSWER"),
+                         QString::number(questionId),
+                         answer,
+                         QString::number(player.candidates.size())};
+    if (!hintKind.isEmpty()) {
+        response << hintKind << QString::number(metric, 'f', 3);
+    }
+
+    send(slot, response);
+    send(opponentSlot(slot), {QStringLiteral("OPPONENT"),
+                              QString::number(questionId),
+                              answer});
 
     qInfo().noquote() << QStringLiteral("Игрок %1 спросил #%2 (%3) -> %4, %5: %6")
                              .arg(player.id)
@@ -484,8 +491,8 @@ void Server::applyQuestion(int slot, int questionId, const QJsonObject& hint)
                              .arg(QString::fromStdString(
                                  gamecore::questionTexts()[static_cast<std::size_t>(questionId)]))
                              .arg(answer)
-                             .arg(hint.isEmpty() ? QStringLiteral("таблица отфильтрована")
-                                                 : QStringLiteral("подсказка отфильтровала"))
+                             .arg(hintKind.isEmpty() ? QStringLiteral("таблица отфильтрована")
+                                                     : QStringLiteral("подсказка отфильтровала"))
                              .arg(player.candidates.size());
 
     switchTurn();
@@ -494,7 +501,7 @@ void Server::applyQuestion(int slot, int questionId, const QJsonObject& hint)
 void Server::switchTurn()
 {
     turn_ = turn_ == 1 ? 2 : 1;
-    broadcast(proto::makeTurn(turn_));
+    broadcast({QStringLiteral("TURN"), QString::number(turn_)});
     qInfo().noquote() << QStringLiteral("Ход переходит к игроку %1").arg(turn_);
 }
 
@@ -504,13 +511,19 @@ void Server::handleGetCandidates(int slot)
         return;
     }
     const Player& player = players_[slot];
-    send(slot, proto::makeCandidates(player.candidates));
+
+    QStringList response{QStringLiteral("CANDIDATES")};
+    for (int id : player.candidates) {
+        response << QString::number(id);
+    }
+    send(slot, response);
+
     qInfo().noquote() << QStringLiteral("Игрок %1 запросил кандидатов (%2)")
                              .arg(player.id)
                              .arg(player.candidates.size());
 }
 
-void Server::handleRemove(int slot, const proto::Message& message)
+void Server::handleRemove(int slot, const QStringList& parts)
 {
     if (!ensureInGame(slot)) {
         return;
@@ -520,7 +533,12 @@ void Server::handleRemove(int slot, const proto::Message& message)
     gamecore::CandidateSet& candidates = player.candidates;
 
     int removed = 0;
-    for (int id : message.characterIds) {
+    for (int i = 1; i < parts.size(); ++i) {
+        bool ok = false;
+        const int id = parts.at(i).toInt(&ok);
+        if (!ok) {
+            continue;
+        }
         const auto it = std::find(candidates.begin(), candidates.end(), id);
         if (it != candidates.end()) {
             candidates.erase(it);
@@ -528,7 +546,7 @@ void Server::handleRemove(int slot, const proto::Message& message)
         }
     }
 
-    send(slot, proto::makeRemoveOk(static_cast<int>(candidates.size())));
+    send(slot, {QStringLiteral("REMOVED"), QString::number(candidates.size())});
     qInfo().noquote() << QStringLiteral("Игрок %1 удалил %2 кандидатов, осталось %3")
                              .arg(player.id)
                              .arg(removed)
@@ -553,7 +571,7 @@ void Server::handleGuess(int slot, int characterId)
     }
 
     const Player& opponent = players_[opponentSlot(slot)];
-    player.lastTurnWasHint = false; // догадка — не подсказка, запрет снимается
+    player.lastTurnWasHint = false;
     const int secret = opponent.secret;
     const QString secretName =
         QString::fromStdString(gamecore::characterNames()[static_cast<std::size_t>(secret)]);
@@ -563,7 +581,9 @@ void Server::handleGuess(int slot, int characterId)
         for (Player& p : players_) {
             p.wantsRematch = false;
         }
-        broadcast(proto::makeMatchOver(player.id, secret, secretName));
+        broadcast({QStringLiteral("OVER"),
+                   QString::number(player.id),
+                   QString::number(secret)});
         qInfo().noquote() << QStringLiteral("Игрок %1 угадал «%2» и победил")
                                  .arg(player.id)
                                  .arg(secretName);
@@ -572,7 +592,7 @@ void Server::handleGuess(int slot, int characterId)
 
     const QString guessedName =
         QString::fromStdString(gamecore::characterNames()[static_cast<std::size_t>(characterId)]);
-    send(slot, proto::makeGuessResult(false));
+    send(slot, {QStringLiteral("WRONG")});
     qInfo().noquote() << QStringLiteral("Игрок %1 ошибся: «%2» вместо «%3»")
                              .arg(player.id)
                              .arg(guessedName)

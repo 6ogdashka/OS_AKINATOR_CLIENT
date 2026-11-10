@@ -1,4 +1,3 @@
-// mainwindow.h — GUI-клиент «Боя Акинаторов»: подключение, выбор секрета, игра.
 #pragma once
 
 #include <QList>
@@ -6,8 +5,6 @@
 #include <QSet>
 #include <QString>
 #include <QStringList>
-
-#include "protocol.h"
 
 class Connection;
 
@@ -31,18 +28,8 @@ public:
 private slots:
     void onConnectClicked();
     void onConnectionClosed();
-    void onWelcome(int player);
-    void onStart(const QStringList& players);
-    void onTurnChanged(int player);
-    void onAnswer(const proto::Message& message);
-    void onHintStatus(const QJsonObject& hintsLeft);
-    void onOpponentAsked(int questionId, const QString& answer);
-    void onCandidates(const QList<int>& characterIds);
-    void onRemoveOk(int remaining);
-    void onGuessResult(bool correct);
-    void onMatchOver(int winner, int characterId, const QString& character);
-    void onServerError(const QString& text);
-    void onOpponentDisconnected(const QString& text);
+
+    void onMessage(const QStringList& parts);
 
     void onSecretSearchChanged(const QString& text);
     void onConfirmSecretClicked();
@@ -78,13 +65,27 @@ private:
     void appendLog(const QString& text);
     void updateCandidatesLabel();
     void updateHintsLabel();
-    // Подпись «Ваш персонаж: …» — напоминает игроку его собственный секрет.
+
     void updateMySecretLabel();
     void updateTurnStatus();
-    // Картинка состояния (idle/think/happy/hard) в игровой панели.
+
     void updateStateImage();
 
-    void requestHint(proto::HintKind kind);
+    void onWelcome(int player);
+    void onStart();
+    void onTurnChanged(int player);
+    void onAnswer(int questionId, const QString& answer, int remaining,
+                  const QString& hintKind, double hintMetric);
+    void onHintStatus(int variance, int randomForest, int catBoost);
+    void onOpponentAsked(int questionId, const QString& answer);
+    void onCandidates(const QList<int>& characterIds);
+    void onRemoveOk(int remaining);
+    void onGuessResult();
+    void onMatchOver(int winner, int characterId);
+    void onServerError(const QString& text);
+    void onOpponentDisconnected(const QString& text);
+
+    void requestHint(const QString& kind);
     int askQuestionDialog();
     void openTableDialog(const QList<int>& characterIds);
     int guessDialog(const QList<int>& characterIds);
@@ -97,21 +98,16 @@ private:
 
     QStackedWidget* stack_ = nullptr;
 
-    // Экран подключения.
     QLineEdit* hostField_ = nullptr;
     QSpinBox* portField_ = nullptr;
     QPushButton* connectButton_ = nullptr;
     QLabel* connectStatusLabel_ = nullptr;
-    QLabel* connectImage_ = nullptr;
 
-    // Экран выбора персонажа.
     QLineEdit* searchField_ = nullptr;
     QListWidget* characterList_ = nullptr;
     QPushButton* confirmSecretButton_ = nullptr;
     QLabel* secretStatusLabel_ = nullptr;
-    QLabel* secretImage_ = nullptr;
 
-    // Экран игры.
     QLabel* statusLabel_ = nullptr;
     QLabel* mySecretLabel_ = nullptr;
     QLabel* candidatesLabel_ = nullptr;
@@ -130,13 +126,10 @@ private:
     UiState state_ = UiState::Disconnected;
     PendingRequest pending_ = PendingRequest::None;
     int localPlayer_ = 0;
-    // Свой загаданный персонаж: сервер его не присылает обратно (это секрет),
-    // поэтому клиент запоминает выбор сам и показывает его всю партию.
+
     int mySecretId_ = -1;
-    int currentTurn_ = 0;
     bool waitingAnswer_ = false;
-    // true, если прошлым ходом была подсказка: вторую подряд сервер отклонит,
-    // поэтому кнопки подсказок гаснут до обычного вопроса/догадки.
+
     bool hintUsedLastTurn_ = false;
     bool lastMatchWon_ = false;
     int candidatesCount_ = 0;

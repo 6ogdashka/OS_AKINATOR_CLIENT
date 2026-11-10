@@ -1,121 +1,57 @@
-// protocol.h — NDJSON-протокол «Боя Акинаторов».
-// Каждое сообщение — один JSON-объект в одной строке, завершённый '\n' (UTF-8).
 #pragma once
 
 #include <QByteArray>
-#include <QJsonObject>
 #include <QString>
 #include <QStringList>
 
-#include <vector>
-
 namespace proto {
-
-// Пределы протокола: обязаны совпадать с gamecore::kCharacterCount/kQuestionCount
-// и числом игроков в лобби (проверяется static_assert'ами в server.cpp).
-constexpr int kCharacterCount = 60;
-constexpr int kQuestionCount = 139;
-constexpr int kPlayerCount = 2;
-
-// Максимальный размер незавершённой NDJSON-строки в буфере чтения.
-// Защита от «забытого» '\n': иначе буфер растёт неограниченно.
 constexpr int kMaxLineBytes = 64 * 1024;
 
-// Виды подсказок (совпадают с gamecore::hint*).
-enum class HintKind { Variance, RandomForest, CatBoost };
+inline QStringList takeLines(QByteArray* buffer)
+{
+    QStringList lines;
+    if (!buffer) {
+        return lines;
+    }
 
-// Все типы сообщений протокола (раздел 6 ТЗ).
-enum class Type {
-    // клиент -> сервер
-    SetSecret,
-    Question,
-    Hint,
-    GetCandidates,
-    Remove,
-    Guess,
-    Rematch,
-    Leave,
-    // сервер -> клиент
-    Welcome,
-    Start,
-    Turn,
-    Answer,
-    HintStatus,
-    OpponentAsked,
-    Candidates,
-    RemoveOk,
-    GuessResult,
-    MatchOver,
-    Error,
-    OpponentDisconnected
-};
+    int start = 0;
+    int index = 0;
+    while ((index = buffer->indexOf('\n', start)) >= 0) {
+        QString line = QString::fromUtf8(buffer->mid(start, index - start)).trimmed();
+        start = index + 1;
+        if (!line.isEmpty()) {
+            lines.append(line);
+        }
+    }
+    if (start > 0) {
+        buffer->remove(0, start);
+    }
+    return lines;
+}
 
-QString hintKindToString(HintKind kind);
-bool hintKindFromString(const QString& text, HintKind* out);
+inline QStringList parseLine(const QString& line)
+{
+    return line.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+}
 
-QString typeToString(Type type);
-bool typeFromString(const QString& text, Type* out);
+inline bool readInt(const QStringList& parts, int index, int* out)
+{
+    if (index < 0 || index >= parts.size()) {
+        return false;
+    }
+    bool ok = false;
+    const int value = parts.at(index).toInt(&ok);
+    if (!ok) {
+        return false;
+    }
+    if (out) {
+        *out = value;
+    }
+    return true;
+}
 
-// Разобранное сообщение: тип + типизированные поля + исходный JSON.
-struct Message {
-    Type type = Type::Error;
-    QJsonObject raw;
-
-    int characterId = -1;
-    int questionId = -1;
-    int player = 0;
-    int winner = 0;
-    int remaining = -1;  // кандидатов у игрока: обычный вопрос набор не меняет,
-                         // подсказка — уже отфильтрованный набор
-    int count = -1;
-    bool correct = false;
-
-    QString answer;    // "yes" / "no"
-    QString character;  // имя персонажа в matchover
-    QString text;       // текст ошибки / opponent_disconnected
-    QString hintKindText;
-
-    HintKind hintKind = HintKind::Variance;
-    bool hasHint = false;
-
-    QStringList players;
-    QJsonObject hintsLeft;
-    std::vector<int> characterIds;
-};
-
-// Разбор одной строки. false + текст ошибки в error при некорректном вводе.
-bool parseMessage(const QByteArray& line, Message* out, QString* error);
-
-// Нарезка NDJSON-буфера: возвращает готовые строки, остаток остаётся в buffer.
-QStringList splitFramedLines(QByteArray* buffer);
-
-// --- Сборка сообщений сервер -> клиент ---
-QJsonObject makeWelcome(int player);
-QJsonObject makeStart(const QStringList& players);
-QJsonObject makeTurn(int player);
-QJsonObject makeAnswer(int questionId, const QString& answer, int remaining,
-                       const QJsonObject& hint = QJsonObject());
-QJsonObject makeHintInfo(const QString& kind, double metric);
-QJsonObject makeHintStatus(int variance, int randomForest, int catBoost);
-QJsonObject makeOpponentAsked(int questionId, const QString& answer);
-QJsonObject makeCandidates(const std::vector<int>& characterIds);
-QJsonObject makeRemoveOk(int remaining);
-QJsonObject makeGuessResult(bool correct);
-QJsonObject makeMatchOver(int winner, int characterId, const QString& character);
-QJsonObject makeError(const QString& message);
-QJsonObject makeOpponentDisconnected(const QString& message);
-
-// --- Сборка сообщений клиент -> сервер ---
-QJsonObject makeSetSecret(int characterId);
-QJsonObject makeQuestion(int questionId);
-QJsonObject makeHint(HintKind kind);
-QJsonObject makeGetCandidates();
-QJsonObject makeRemove(const std::vector<int>& characterIds);
-QJsonObject makeGuess(int characterId);
-QJsonObject makeRematch();
-QJsonObject makeLeave();
-
-// JSON-объект -> одна строка NDJSON (компактный JSON + '\n').
-QByteArray toLine(const QJsonObject& object);
-
-} // namespace proto
+inline QByteArray makeLine(const QStringList& parts)
+{
+    return (parts.join(QLatin1Char(' ')) + QLatin1Char('\n')).toUtf8();
+}
+}

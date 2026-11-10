@@ -1,4 +1,3 @@
-// export.h — макрос экспорта символов gamecore (SHARED-библиотека).
 #pragma once
 
 #if defined(_WIN32)

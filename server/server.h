@@ -1,13 +1,10 @@
-// server.h — авторитетный сервер «Боя Акинаторов»: лобби на 2 игроков,
-// секреты, кандидаты, ходы, три подсказки, угадывание, реванш.
 #pragma once
 
 #include <QByteArray>
 #include <QHostAddress>
-#include <QJsonObject>
-#include <QMap>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QTcpServer>
 #include <QTcpSocket>
 
@@ -15,7 +12,6 @@
 #include <vector>
 
 #include "gamecore/gamecore.h"
-#include "protocol.h"
 
 class Server : public QObject
 {
@@ -26,7 +22,6 @@ public:
     ~Server() override;
 
     bool start(quint16 port, const QHostAddress& address = QHostAddress::Any);
-    quint16 port() const;
 
 private slots:
     void onNewConnection();
@@ -39,14 +34,15 @@ private:
     struct Player {
         QTcpSocket* socket = nullptr;
         QByteArray buffer;
-        int id = 0;                       // 1 или 2
+        int id = 0;
         bool hasSecret = false;
         gamecore::CharacterId secret = -1;
         gamecore::CandidateSet candidates;
         std::vector<int> asked;
-        QMap<QString, int> hintsLeft;
-        // true, если последним ходом игрока была подсказка: следующую подсказку
-        // сервер отклонит, пока он не задаст обычный вопрос или не угадает.
+        int hintsVariance = 0;
+        int hintsRandomForest = 0;
+        int hintsCatBoost = 0;
+
         bool lastTurnWasHint = false;
         bool wantsRematch = false;
     };
@@ -57,8 +53,8 @@ private:
     static int opponentSlot(int slot);
     bool bothConnected() const;
 
-    void send(int slot, const QJsonObject& message);
-    void broadcast(const QJsonObject& message);
+    void send(int slot, const QStringList& parts);
+    void broadcast(const QStringList& parts);
     void sendError(int slot, const QString& text);
     void sendHintStatus(int slot);
 
@@ -67,12 +63,12 @@ private:
     void clearSecrets();
     void maybeStartMatch();
 
-    void handleMessage(int slot, const proto::Message& message);
-    void handleSetSecret(int slot, const proto::Message& message);
+    void handleMessage(int slot, const QStringList& parts);
+    void handleSetSecret(int slot, int characterId);
     void handleQuestion(int slot, int questionId);
-    void handleHint(int slot, proto::HintKind kind);
+    void handleHint(int slot, const QString& kind);
     void handleGetCandidates(int slot);
-    void handleRemove(int slot, const proto::Message& message);
+    void handleRemove(int slot, const QStringList& parts);
     void handleGuess(int slot, int characterId);
     void handleRematch(int slot);
     void handleLeave(int slot);
@@ -81,10 +77,7 @@ private:
     bool ensureTurn(int slot);
     bool isAsked(int slot, int questionId) const;
 
-    // Обычный вопрос и подсказка одинаково фильтруют список кандидатов: ответ
-    // авторитетный, поэтому сервер сразу убирает неподходящих (hint пуст для
-    // обычного вопроса и заполнен для подсказки).
-    void applyQuestion(int slot, int questionId, const QJsonObject& hint);
+    void applyQuestion(int slot, int questionId, const QString& hintKind, double metric);
     void switchTurn();
     void dropLobby(int closingSlot);
 

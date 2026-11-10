@@ -1,11 +1,3 @@
-/* style.qss — тема «Бой Акинаторов».
- * Палитра взята с иллюстраций Акинаторов: фиолетовый колпак (#7B3FA0),
- * золотой месяц (#F2C230) и серо-дымчатый хвост джинна (#C9CCD3).
- * Стили применяются в client/main.cpp через QApplication::setStyleSheet.
- */
-
-/* --- База ---------------------------------------------------------------- */
-
 QWidget {
     color: #EDE7F6;
     font-size: 14px;
@@ -28,8 +20,6 @@ QToolTip {
     border-radius: 6px;
     padding: 4px 8px;
 }
-
-/* --- Карточки и заголовки ------------------------------------------------ */
 
 QFrame#card {
     background: rgba(42, 31, 61, 0.92);
@@ -101,8 +91,6 @@ QLabel#hintStat {
     font-size: 12px;
 }
 
-/* Свой загаданный персонаж: золотая плашка в игровой панели — чтобы игрок
- * в любой момент видел, кого загадал (сервер секрет обратно не присылает). */
 QLabel#mySecretLabel {
     padding: 6px 10px;
     border-radius: 10px;
@@ -117,7 +105,6 @@ QLabel#mutedLabel {
     color: #A99BC0;
 }
 
-/* Ошибка подключения/сервера: подсказка выводится тем же лейблом. */
 QLabel#mutedLabel[error="true"] {
     color: #F2A2A2;
 }
@@ -139,8 +126,6 @@ QLabel#turnBadge {
     font-weight: 700;
     font-size: 12px;
 }
-
-/* --- Кнопки -------------------------------------------------------------- */
 
 QPushButton {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -235,8 +220,6 @@ QPushButton#dangerButton:disabled {
     color: #7A6672;
 }
 
-/* --- Поля ввода ---------------------------------------------------------- */
-
 QLineEdit,
 QSpinBox {
     background: #1B1428;
@@ -263,8 +246,6 @@ QSpinBox:disabled {
 QLineEdit#searchField {
     padding-left: 14px;
 }
-
-/* --- Списки -------------------------------------------------------------- */
 
 QListWidget {
     background: #1B1428;
@@ -297,8 +278,6 @@ QListWidget::item:selected:!active {
     color: #FFFFFF;
 }
 
-/* --- Журнал партии ------------------------------------------------------- */
-
 QPlainTextEdit,
 QTextEdit {
     background: #140F1D;
@@ -309,8 +288,6 @@ QTextEdit {
     selection-background-color: #7B3FA0;
     selection-color: #FFFFFF;
 }
-
-/* --- Полосы прокрутки ---------------------------------------------------- */
 
 QScrollBar:vertical {
     background: transparent;
@@ -360,8 +337,6 @@ QScrollBar::sub-line:horizontal {
     height: 0;
     width: 0;
 }
-
-/* --- Прочее -------------------------------------------------------------- */
 
 QDialogButtonBox QPushButton {
     min-width: 110px;

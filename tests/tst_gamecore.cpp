@@ -1,4 +1,3 @@
-// tst_gamecore.cpp — тесты данных, фильтрации и трёх подсказок gamecore.
 #include <QtTest>
 
 #include "gamecore/gamecore.h"
@@ -8,7 +7,6 @@
 using namespace gamecore;
 
 namespace {
-
 CandidateSet allCandidates()
 {
     CandidateSet candidates(kCharacterCount);
@@ -16,7 +14,6 @@ CandidateSet allCandidates()
     return candidates;
 }
 
-// Ручная (brute-force) реализация выбора вопроса по дисперсии — эталон для теста 7.
 HintResult bruteForceVariance(const CandidateSet& candidates)
 {
     HintResult best;
@@ -37,8 +34,7 @@ HintResult bruteForceVariance(const CandidateSet& candidates)
     }
     return best;
 }
-
-} // namespace
+}
 
 class TestGameCore : public QObject
 {
@@ -61,7 +57,6 @@ private slots:
     void hints_noInfo();
 };
 
-// 1. Данные: 60 имён, 139 вопросов, матрица 60*139, значения только -1/+1.
 void TestGameCore::data_integrity()
 {
     QCOMPARE(static_cast<int>(characterNames().size()), kCharacterCount);
@@ -79,7 +74,6 @@ void TestGameCore::data_integrity()
     }
 }
 
-// 2. value(c,q) совпадает с матрицей.
 void TestGameCore::value_roundtrip()
 {
     const std::vector<std::int8_t>& m = matrix();
@@ -94,7 +88,6 @@ void TestGameCore::value_roundtrip()
     }
 }
 
-// 3. filterCandidates(..., +1) == подмножество с value==+1.
 void TestGameCore::filter_yes()
 {
     const CandidateSet all = allCandidates();
@@ -110,7 +103,6 @@ void TestGameCore::filter_yes()
     }
 }
 
-// 4. filterCandidates(..., -1) == подмножество с value==-1.
 void TestGameCore::filter_no()
 {
     const CandidateSet all = allCandidates();
@@ -126,7 +118,6 @@ void TestGameCore::filter_no()
     }
 }
 
-// 5. Пустой вход -> пустой выход.
 void TestGameCore::filter_empty()
 {
     const CandidateSet empty;
@@ -134,7 +125,6 @@ void TestGameCore::filter_empty()
     QVERIFY(filterCandidates(empty, 42, -1).empty());
 }
 
-// 6. Несортированный вход с повтором -> отсортированный результат без повторов.
 void TestGameCore::filter_preservesOrder()
 {
     const CandidateSet messy = {59, 0, 30, 0, 12, 59};
@@ -152,7 +142,6 @@ void TestGameCore::filter_preservesOrder()
     QCOMPARE(result, expected);
 }
 
-// 7. hintVariance совпадает с brute-force максимумом 4p(1-p).
 void TestGameCore::variance_max()
 {
     const CandidateSet all = allCandidates();
@@ -163,7 +152,6 @@ void TestGameCore::variance_max()
     QVERIFY(qFuzzyCompare(actual.score, expected.score));
 }
 
-// 8. Исключённые вопросы не возвращаются.
 void TestGameCore::variance_excluded()
 {
     const CandidateSet all = allCandidates();
@@ -182,7 +170,6 @@ void TestGameCore::variance_excluded()
     QVERIFY(third.question != next.question);
 }
 
-// 9. Кандидаты с одинаковыми строками -> вопроса нет.
 void TestGameCore::variance_noInfo()
 {
     const CandidateSet twins = {3, 3};
@@ -191,7 +178,6 @@ void TestGameCore::variance_noInfo()
     QVERIFY(qFuzzyIsNull(result.score));
 }
 
-// 10. Random Forest возвращает валидный вопрос с положительным score.
 void TestGameCore::rf_valid()
 {
     const HintResult result = hintRandomForest(allCandidates(), {});
@@ -200,7 +186,6 @@ void TestGameCore::rf_valid()
     QVERIFY(result.score > 0.0);
 }
 
-// 11. Random Forest детерминирован.
 void TestGameCore::rf_deterministic()
 {
     const CandidateSet all = allCandidates();
@@ -216,7 +201,6 @@ void TestGameCore::rf_deterministic()
     QCOMPARE(third.score, fourth.score);
 }
 
-// 12. CatBoost возвращает валидный вопрос с положительным score.
 void TestGameCore::catboost_valid()
 {
     const HintResult result = hintCatBoost(allCandidates(), {});
@@ -225,7 +209,6 @@ void TestGameCore::catboost_valid()
     QVERIFY(result.score > 0.0);
 }
 
-// 13. CatBoost детерминирован.
 void TestGameCore::catboost_deterministic()
 {
     const CandidateSet all = allCandidates();
@@ -235,7 +218,6 @@ void TestGameCore::catboost_deterministic()
     QCOMPARE(first.score, second.score);
 }
 
-// 14. Нет информативных вопросов -> все три подсказки возвращают -1.
 void TestGameCore::hints_noInfo()
 {
     const CandidateSet twins = {3, 3};
@@ -248,7 +230,6 @@ void TestGameCore::hints_noInfo()
     QCOMPARE(hintRandomForest(single, {}).question, -1);
     QCOMPARE(hintCatBoost(single, {}).question, -1);
 
-    // Все вопросы исключены — информативного тоже нет.
     const CandidateSet all = allCandidates();
     std::vector<QuestionId> everything(kQuestionCount);
     std::iota(everything.begin(), everything.end(), 0);

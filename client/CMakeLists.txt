@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 
-# akinator-client — GUI-клиент (Qt Widgets) поверх общего протокола.
-# AUTORCC подключает картинки состояний и style.qss из resources.qrc.
 set(CMAKE_AUTORCC ON)
 
 add_executable(akinator-client

@@ -7,8 +7,8 @@
 указанный здесь, и продолжай работу.
 
 - Создай проект в новой папке `akinator-battle/` рядом с этим файлом.
-- Данные: скопируй `/home/Rvi/Big-Three-Akinator/selected_characters.csv`
-  в `akinator-battle/data/selected_characters.csv`.
+- Данные (60 персонажей × 139 вопросов) уже лежат в `gamecore/src/data.h`;
+  отдельного CSV/генератора нет — это единственный источник истины.
 - Выполняй задачи строго по порядку из раздела 11 (Задача 1 → 2 → … → 11).
 - После каждой задачи проект обязан собираться: `cmake --build build`.
   Тесты, где указаны, должны быть зелёными.
@@ -22,7 +22,7 @@
 
 **Допущения (не менять):**
 - Игра — дуэль Акинаторов: 2 игрока, каждый тайно загадывает персонажа из 60
-  отобранных (`data/selected_characters.csv`), по очереди задают вопросы да/нет,
+  отобранных (`gamecore/src/data.h`), по очереди задают вопросы да/нет,
   кто первым угадает персонажа противника — тот победил.
 - Таблица: 60 персонажей × 139 бинарных вопросов; значения только `1` (да) и
   `-1` (нет), варианта «не знаю» нет. Источник истины — `gamecore` (данные вшиты).
@@ -36,7 +36,8 @@
   in-memory алгоритма на чистом C++ внутри `gamecore` (без Python и libcatboost).
   Обоснование: таблица маленькая и фиксированная, ноль внешних ML-зависимостей,
   самодостаточная SHARED-библиотека.
-- Протокол — newline-delimited JSON (NDJSON), разделитель `\n`, UTF-8.
+- Протокол — текстовые команды: одна строка UTF-8, аргументы через пробел,
+  разделитель `\n`.
 - Свой секрет сервер не возвращает (это тайна от соперника), поэтому клиент
   запоминает выбранного персонажа локально и показывает его игроку подписью
   «Ваш персонаж: N» всю партию — чтобы не забыть, кого загадал.
@@ -51,7 +52,7 @@
 - In-memory RF/бустинг может быть капризным → фиксированные seed и глубина дают
   детерминизм (тесты раздела 10 проверяют детерминированность и валидность).
 - Файрвол/NAT публичного сервера — не решается кодом (чек-лист раздела 12).
-- Разрыв соединения — `opponent_disconnected` + сброс лобби (раздел 7).
+- Разрыв соединения — `OPPONENT_LEFT` + сброс лобби (раздел 7).
 - Windows не находит `gamecore.dll` — единая папка вывода бинарников (раздел 4).
 - Русский текст — файлы в UTF-8, строки через `u8"..."`.
 
@@ -62,15 +63,15 @@
 ```
 [Клиент A: Windows]                     [Сервер: Linux/VPS]                        [Клиент B: Linux/macOS]
  QtWidgets (GUI)                        QTcpServer (listen)                         QtWidgets (GUI)
- QTcpSocket ──TCP/NDJSON──►  accept ◄──  секреты + кандидаты обоих  ──►  accept ◄──TCP/NDJSON── QTcpSocket
- akinator_protocol (JSON)                  gamecore: matrix/filter/3 подсказки          akinator_protocol (JSON)
- gamecore (имена/вопросы/данные)           akinator_protocol (JSON)                     gamecore (имена/вопросы/данные)
+ QTcpSocket ──TCP (текст)──►  accept ◄──  секреты + кандидаты обоих  ──►  accept ◄──TCP (текст)── QTcpSocket
+ protocol.h (текст)                        gamecore: matrix/filter/3 подсказки          protocol.h (текст)
+ gamecore (имена/вопросы/данные)           protocol.h (текст)                           gamecore (имена/вопросы/данные)
 ```
 
 **Роли целей:**
 - `gamecore` (SHARED, чистый C++) — данные (имена/тексты/матрица), `filterCandidates`,
   три подсказки. Используют **сервер, клиент, тесты**.
-- `akinator_protocol` (STATIC) — (де)сериализация NDJSON на `QJsonDocument`.
+- `akinator_protocol` (INTERFACE, header-only) — разбор и сборка текстовых строк.
   Используют **сервер, клиент, тесты**.
 - `akinator-server` (EXE) — авторитетный сервер.
 - `akinator-client` (EXE) — GUI.
@@ -78,17 +79,16 @@
 
 **Поток данных (счастливый путь):**
 1. Клиент читает env → предзаполняет host/port → `Connect`.
-2. Оба клиента шлют `set_secret` (выбор персонажа из 60). Сервер хранит секреты.
-3. Когда оба загадали → `start` + `turn` (ходит игрок 1).
-4. Ход: игрок шлёт `question` (или `hint`). Сервер берёт значение вопроса у
+2. Оба клиента шлют `SECRET` (выбор персонажа из 60). Сервер хранит секреты.
+3. Когда оба загадали → `START` + `TURN` (ходит игрок 1).
+4. Ход: игрок шлёт `ASK` (или `HINT`). Сервер берёт значение вопроса у
    **секрета противника** → формирует ответ и сам сокращает **кандидатов
-   спрашивающего** через `filterCandidates` (одинаково для `question` и `hint`,
-   см. раздел 7) → шлёт ему `answer` (+`hint` для подсказки), противнику
-   `opponent_asked` (инфо) → `turn` второму.
-5. Игрок может `get_candidates` / `remove` (просмотр и ручное удаление из своего
+   спрашивающего** через `filterCandidates` (одинаково для `ASK` и `HINT`,
+   см. раздел 7) → шлёт ему `ANSWER` (+вид подсказки для `HINT`), противнику
+   `OPPONENT` (инфо) → `TURN` второму.
+5. Игрок может `TABLE` / `REMOVE` (просмотр и ручное удаление из своего
    списка) — без смены хода.
-6. Игрок шлёт `guess`. Верно → `matchover` обоим; неверно →
-   `guess_result(correct:false)` + смена хода.
+6. Игрок шлёт `GUESS`. Верно → `OVER` обоим; неверно → `WRONG` + смена хода.
 7. Первый верно угадавший побеждает.
 ---
 
@@ -100,46 +100,37 @@ akinator-battle/
 ├── README.md                   # описание, сборка, запуск, env, демо (структура — раздел 13)
 ├── .gitignore                  # build/, *.user, CMakeCache.txt
 │
-├── data/
-│   └── selected_characters.csv # 60 персонажей × 140 колонок (Character + 139 вопросов) — источник данных
-│
-├── tools/
-│   └── generate_data.py        # CSV → gamecore/generated/data.{h,cpp} (запускается вручную, результат закоммичен)
-│
 ├── gamecore/                   # Динамическая библиотека (SHARED), без Qt
 │   ├── CMakeLists.txt          # add_library(gamecore SHARED ...), GAMECORE_BUILD
 │   ├── include/gamecore/
 │   │   ├── export.h            # макрос GAMECORE_EXPORT (dllimport/dllexport / visibility)
 │   │   └── gamecore.h          # типы, данные, filterCandidates, HintResult, 3 подсказки
-│   ├── src/
-│   │   └── gamecore.cpp        # filterCandidates + hintVariance/RandomForest/CatBoost
-│   └── generated/
-│       ├── data.h              # объявления kCharacterNames/kQuestionTexts/kMatrix (ГЕНЕРИРУЕТСЯ)
-│       └── data.cpp            # данные: 60 имён, 139 текстов, матрица 60×139 (±1) (ГЕНЕРИРУЕТСЯ)
+│   └── src/
+│       ├── gamecore.cpp        # filterCandidates + hintVariance/RandomForest/CatBoost
+│       └── data.h              # единственный источник данных: 60 имён, 139 текстов, матрица 60×139 (±1)
 │
-├── common/                     # Статическая библиотека протокола (STATIC), использует Qt::Core
-│   ├── CMakeLists.txt          # add_library(akinator_protocol STATIC ...), link Qt6::Core
-│   ├── protocol.h              # объявления функций (де)сериализации сообщений
-│   └── protocol.cpp            # реализация на QJsonDocument
+├── common/                     # Header-only помощник протокола, использует Qt::Core
+│   ├── CMakeLists.txt          # add_library(akinator_protocol INTERFACE), link Qt6::Core
+│   └── protocol.h              # константы, takeLines/parseLine/readInt/makeLine
 │
 ├── server/
 │   ├── CMakeLists.txt          # add_executable(akinator-server ...), link Qt6::Core Qt6::Network akinator_protocol gamecore
 │   ├── main.cpp                # QCoreApplication, чтение env, запуск Server
 │   ├── server.h                # класс Server: QTcpServer, лобби, секреты, кандидаты, ходы
-│   └── server.cpp              # accept, set_secret/question/hint/guess/remove, disconnect, рассылка
+│   └── server.cpp              # accept, SECRET/ASK/HINT/GUESS/REMOVE, disconnect, рассылка
 │
 ├── client/
 │   ├── CMakeLists.txt          # add_executable(akinator-client ...), link Qt6::Widgets Qt6::Network akinator_protocol gamecore
 │   ├── main.cpp                # QApplication, чтение env, создание MainWindow
 │   ├── mainwindow.h            # GUI: выбор персонажа, вопросы, подсказки, таблица, угадать, статус
 │   ├── mainwindow.cpp          # слоты кнопок, реакции на сообщения
-│   ├── connection.h            # обёртка QTcpSocket + NDJSON-фрейминг
+│   ├── connection.h            # обёртка QTcpSocket + фрейминг строк по '\n'
 │   └── connection.cpp          # readyRead → накопление буфера → эмит строк по '\n'
 │
 └── tests/
     ├── CMakeLists.txt          # add_executable(tst_gamecore, tst_protocol), add_test(...)
     ├── tst_gamecore.cpp        # тесты данных/filter/подсказок (QtTest)
-    └── tst_protocol.cpp        # тесты (де)сериализации протокола (QtTest)
+    └── tst_protocol.cpp        # тесты текстового протокола (QtTest)
 ```
 
 ---
@@ -159,7 +150,7 @@ akinator-battle/
 
 | Компонент | Кто использует | Зачем |
 |---|---|---|
-| `Core` | protocol, server, client, tests | `QJsonDocument`, `QObject`, `QCoreApplication` |
+| `Core` | protocol, server, client, tests | `QString`, `QByteArray`, `QObject`, `QCoreApplication` |
 | `Network` | server, client | `QTcpServer`, `QTcpSocket` |
 | `Widgets` | client | GUI |
 | `Test` | tests | `QTest` |
@@ -169,7 +160,7 @@ akinator-battle/
 | Цель | Тип | Линкует | Примечание |
 |---|---|---|---|
 | `gamecore` | `SHARED` | (ничего) | `target_compile_definitions(gamecore PRIVATE GAMECORE_BUILD)`; `target_include_directories(gamecore PUBLIC include)` |
-| `akinator_protocol` | `STATIC` | `Qt6::Core` | `target_include_directories(akinator_protocol PUBLIC .)` |
+| `akinator_protocol` | `INTERFACE` | `Qt6::Core` | `target_include_directories(akinator_protocol INTERFACE .)` |
 | `akinator-server` | EXE | `Qt6::Core`, `Qt6::Network`, `akinator_protocol`, `gamecore` | консольное |
 | `akinator-client` | EXE | `Qt6::Widgets`, `Qt6::Network`, `akinator_protocol`, `gamecore` | на MSVC можно `WIN32_EXECUTABLE TRUE` |
 | `tst_gamecore` | EXE | `gamecore`, `Qt6::Test` | — |
@@ -220,7 +211,7 @@ using CandidateSet = std::vector<CharacterId>; // отсортирован, бе
 constexpr int kCharacterCount = 60;
 constexpr int kQuestionCount  = 139;
 
-// --- Данные (генерируются из selected_characters.csv) ---
+// --- Данные (единственный источник — src/data.h) ---
 GAMECORE_EXPORT const std::vector<std::string>& characterNames(); // 60 имён, UTF-8
 GAMECORE_EXPORT const std::vector<std::string>& questionTexts();  // 139 текстов, UTF-8
 // Матрица row-major: matrix[charId * kQuestionCount + questionId] ∈ {-1, +1}
@@ -263,100 +254,101 @@ GAMECORE_EXPORT HintResult hintCatBoost(const CandidateSet& candidates,
   в `excluded`, вернуть `{question = -1, score = 0}`.
 ---
 
-## 6. Спецификация сетевого протокола (NDJSON)
+## 6. Спецификация сетевого протокола (текстовые команды)
 
-Каждое сообщение — один JSON-объект в одной строке, завершён `\n`. Обязательное
-поле — `type`.
+Каждое сообщение — одна строка UTF-8; команда и аргументы разделены пробелами,
+строка завершена `\n`. Регистр команд — верхний. Индексы: `characterId` 0..59,
+`questionId` 0..138.
 
 ### 6.1. Сообщения клиент → сервер
 
-| `type` | Поля | Описание |
+| Команда | Аргументы | Описание |
 |---|---|---|
-| `set_secret` | `characterId`: int (0..59) | Выбор секретного персонажа (один раз до старта) |
-| `question` | `questionId`: int (0..138) | Задать вопрос о персонаже противника |
-| `hint` | `kind`: `"variance"`\|`"randomforest"`\|`"catboost"` | Использовать подсказку |
-| `get_candidates` | — | Запросить свой текущий список кандидатов |
-| `remove` | `characterIds`: [int] | Удалить персонажей из своего списка вручную |
-| `guess` | `characterId`: int | Угадать персонажа противника |
-| `rematch` | — | Запрос новой партии (после `matchover`) |
-| `leave` | — | Вежливое отключение |
+| `SECRET` | `<characterId>` | Загадать персонажа (один раз до старта) |
+| `ASK` | `<questionId>` | Задать вопрос о персонаже противника |
+| `HINT` | `<variance\|randomforest\|catboost>` | Использовать подсказку |
+| `TABLE` | — | Запросить свой текущий список кандидатов |
+| `REMOVE` | `<characterId> ...` | Удалить персонажей из списка вручную |
+| `GUESS` | `<characterId>` | Угадать персонажа противника |
+| `REMATCH` | — | Запрос новой партии (после `OVER`) |
+| `LEAVE` | — | Вежливое отключение |
 
 Примеры:
-```json
-{"type":"set_secret","characterId":1}
-{"type":"question","questionId":0}
-{"type":"hint","kind":"variance"}
-{"type":"get_candidates"}
-{"type":"remove","characterIds":[3,17,42]}
-{"type":"guess","characterId":24}
-{"type":"rematch"}
+```
+SECRET 1
+ASK 0
+HINT variance
+TABLE
+REMOVE 3 17 42
+GUESS 24
+REMATCH
 ```
 
 ### 6.2. Сообщения сервер → клиент
 
-| `type` | Поля | Описание |
+| Команда | Аргументы | Описание |
 |---|---|---|
-| `welcome` | `player`: 1\|2 | Ваш номер в лобби |
-| `start` | `players`: [name1, name2] | Оба загадали, игра начинается |
-| `turn` | `player`: 1\|2 | Чей сейчас ход |
-| `answer` | `questionId`, `answer`: `"yes"`\|`"no"`, `remaining`: int, `hint`: null \| {`kind`, `metric`} | Итог вопроса/подсказки (спрашивающему) |
-| `hint_status` | `hintsLeft`: {`variance`, `randomforest`, `catboost`} | Остаток подсказок (при старте и после подсказки) |
-| `opponent_asked` | `questionId`, `answer` | Инфо противнику: что у него спросили |
-| `candidates` | `characterIds`: [int], `count`: int | Текущий список кандидатов (ответ на `get_candidates`) |
-| `remove_ok` | `remaining`: int | Подтверждение удаления |
-| `guess_result` | `correct`: bool | Результат неверной догадки (true не шлётся — сразу `matchover`) |
-| `matchover` | `winner`: 1\|2, `characterId`: int, `character`: string | Конец игры |
-| `error` | `message`: string | Ошибка |
-| `opponent_disconnected` | `message`: string | Противник отключился |
+| `WELCOME` | `<player>` (1\|2) | Ваш номер в лобби |
+| `START` | — | Оба загадали, игра начинается |
+| `TURN` | `<player>` (1\|2) | Чей сейчас ход |
+| `ANSWER` | `<questionId> <yes\|no> <remaining> [<hint> <metric>]` | Итог вопроса/подсказки (спрашивающему) |
+| `HINTS` | `<variance> <randomforest> <catboost>` | Остаток подсказок (при старте и после подсказки) |
+| `OPPONENT` | `<questionId> <yes\|no>` | Инфо противнику: что у него спросили |
+| `CANDIDATES` | `<characterId> ...` | Текущий список кандидатов (ответ на `TABLE`) |
+| `REMOVED` | `<remaining>` | Подтверждение ручного удаления |
+| `WRONG` | — | Неверная догадка (при верной сразу `OVER`) |
+| `OVER` | `<winner> <characterId>` | Конец игры; имя персонажа клиент берёт из `gamecore` |
+| `ERROR` | `<text>` | Ошибка; текст — остаток строки |
+| `OPPONENT_LEFT` | `<text>` | Противник отключился |
 
 Примеры:
-```json
-{"type":"welcome","player":1}
-{"type":"start","players":["Player 1","Player 2"]}
-{"type":"turn","player":1}
-{"type":"hint_status","hintsLeft":{"variance":1,"randomforest":1,"catboost":1}}
-{"type":"answer","questionId":0,"answer":"yes","remaining":31,"hint":null}
-{"type":"answer","questionId":12,"answer":"no","remaining":9,"hint":{"kind":"variance","metric":0.96}}
-{"type":"opponent_asked","questionId":12,"answer":"no"}
-{"type":"candidates","characterIds":[0,5,8,11],"count":4}
-{"type":"remove_ok","remaining":4}
-{"type":"guess_result","correct":false}
-{"type":"matchover","winner":2,"characterId":24,"character":"Monkey D. Luffy"}
-{"type":"error","message":"Сейчас не ваш ход"}
-{"type":"opponent_disconnected","message":"Противник отключился"}
+```
+WELCOME 1
+START
+TURN 1
+HINTS 1 1 1
+ANSWER 0 yes 31
+ANSWER 12 no 9 variance 0.960
+OPPONENT 12 no
+CANDIDATES 0 5 8 11
+REMOVED 4
+WRONG
+OVER 2 24
+ERROR Сейчас не ваш ход
+OPPONENT_LEFT Противник отключился
 ```
 
 ### 6.3. Конечный автомат
 
 **Сервер (стейтмашина матча):**
 ```
-WAITING_SECRETS ──(получены set_secret от обоих)──► IN_GAME (turn=1)
+WAITING_SECRETS ──(SECRET от обоих)──► IN_GAME (turn=1)
 IN_GAME:
-   question/hint ──► (ответ из секрета противника) ──► filterCandidates ──► answer(спрашивающему)
-                     + opponent_asked(противнику) ──► switch turn ──► turn
-   guess ──► верно? ──► MATCHOVER
-             неверно? ──► guess_result(false) ──► switch turn
-   get_candidates / remove ──► (без смены хода)
-MATCHOVER ──(оба прислали rematch)──► WAITING_SECRETS (сброс секретов и кандидатов)
-Любое состояние ──(disconnect любого игрока)──► opponent_disconnected другому ──► LOBBY (освободить оба слота)
+   ASK/HINT ──► (ответ из секрета противника) ──► filterCandidates
+            ──► ANSWER спрашивающему + OPPONENT противнику ──► TURN
+   GUESS ──► верно? ──► OVER
+             неверно? ──► WRONG ──► TURN
+   TABLE / REMOVE ──► (без смены хода)
+MATCHOVER ──(оба прислали REMATCH)──► WAITING_SECRETS (сброс секретов и кандидатов)
+Любое состояние ──(disconnect любого игрока)──► OPPONENT_LEFT другому ──► LOBBY (освободить оба слота)
 ```
-- `question`/`hint`/`guess` вне своего хода → `error` «Сейчас не ваш ход».
-- `question` с уже заданным вопросом или `hint` с израсходованным видом → `error`.
-- Вторая подряд подсказка (без обычного вопроса/догадки между ними) → `error`
+- `ASK`/`HINT`/`GUESS` вне своего хода → `ERROR` «Сейчас не ваш ход».
+- `ASK` с уже заданным вопросом или `HINT` с израсходованным видом → `ERROR`.
+- Вторая подряд подсказка (без обычного вопроса/догадки между ними) → `ERROR`
   «Подсказку нельзя использовать два хода подряд»; подсказка при этом не
   тратится и ход не меняется.
-- `set_secret` повторно → `error`.
-- `guess` с несуществующим `characterId` или персонажем не из кандидатов → `error`.
+- `SECRET` повторно → `ERROR`.
+- `GUESS` с несуществующим `characterId` или персонажем не из кандидатов → `ERROR`.
 
 **Клиент:**
 ```
-DISCONNECTED ──Connect──► CONNECTING ──(welcome)──► WAITING_OPPONENT(лобби)
-WAITING_OPPONENT ──(start + turn)──► MY_TURN | OPPONENT_TURN
-MY_TURN: доступны «вопрос/подсказка/таблица/угадать» ──(question/hint)──► WAIT_RESULT
-WAIT_RESULT ──(answer)──► (matchover?) иначе OPPONENT_TURN
-OPPONENT_TURN: интерфейс хода заблокирован; оповещается через opponent_asked
-Любое состояние ──(matchover)──► MATCHOVER
-Любое состояние ──(opponent_disconnected | error)──► показать сообщение ──► DISCONNECTED/WAITING
+DISCONNECTED ──Connect──► CONNECTING ──(WELCOME)──► WAITING_OPPONENT(лобби)
+WAITING_OPPONENT ──(START + TURN)──► MY_TURN | OPPONENT_TURN
+MY_TURN: доступны «вопрос/подсказка/таблица/угадать» ──(ASK/HINT)──► WAIT_RESULT
+WAIT_RESULT ──(ANSWER)──► (OVER?) иначе OPPONENT_TURN
+OPPONENT_TURN: интерфейс хода заблокирован; оповещается через OPPONENT
+Любое состояние ──(OVER)──► MATCHOVER
+Любое состояние ──(OPPONENT_LEFT | ERROR)──► показать сообщение ──► DISCONNECTED/WAITING
 ```
 ---
 
@@ -366,42 +358,40 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 - **Лобби на 2 игрока:** 2 слота `QTcpSocket*`. При подключении: слот 1 →
   `welcome(player=1)`; слот 2 → `welcome(player=2)`; оба заняты →
   `error("Сервер занят")` + `disconnectFromHost()` (третий отклоняется).
-- **Секреты:** хранит `secret[player]` (CharacterId или «не задан»). `set_secret`
-  принимает только в WAITING_SECRETS; когда оба заданы → `start` + `turn(1)` +
-  `hint_status` обоим.
+- **Секреты:** хранит `secret[player]` (CharacterId или «не задан»). `SECRET`
+  принимает только в WAITING_SECRETS; когда оба заданы → `START` + `TURN 1` +
+  `HINTS` обоим.
 - **Кандидаты:** хранит `candidates[player]` (изначально все 60). После каждого
-  `question`/`hint` игрока сервер берёт `value(secret[opponent], questionId)`,
-  формирует `answer` ("yes"/"no"), вызывает
+  `ASK`/`HINT` игрока сервер берёт `value(secret[opponent], questionId)`,
+  формирует `ANSWER` ("yes"/"no"), вызывает
   `gamecore::filterCandidates(candidates[player], questionId, answer)` и обновляет
   счётчик `remaining`.
   > **Принятое в реализации поведение (согласовано с заказчиком):** фильтрация
-  > автоматическая для **любого** вопроса — и обычного `question`, и `hint`.
+  > автоматическая для **любого** вопроса — и обычного `ASK`, и `HINT`.
   > Ответ авторитетный, поэтому сервер сам убирает неподходящих кандидатов и
   > присылает уже сокращённый `remaining`; клиенту не нужно чистить таблицу
-  > руками. Ручной `remove` остаётся как дополнительный инструмент (подстраховка,
+  > руками. Ручной `REMOVE` остаётся как дополнительный инструмент (подстраховка,
   > удаление «на глаз»), но не обязателен для игры. Подсказка дополнительно
   > выбирает вопрос по текущему набору кандидатов.
 - **Ответ — авторитетный:** значение берётся из таблицы секрета противника
   (детерминировано), противник вручную не отвечает; противник получает
-  `opponent_asked` (инфо-лог).
-- **Подсказки:** у каждого игрока `hintsLeft = {variance:1, randomforest:1, catboost:1}`.
-  `hint(kind)` → если остаток 0 → `error`; если **прошлым ходом того же игрока
-  была подсказка** → `error("Подсказку нельзя использовать два хода подряд")`,
-  то есть между двумя подсказками нужен обычный вопрос или догадка. Иначе вызвать
-  соответствующую `gamecore::hint*` на `candidates[player]` с `excluded` = уже
-  заданным вопросам.
-  Если `question == -1` → `error("Нет информативного вопроса")` (подсказка не
+  `OPPONENT` (инфо-лог).
+- **Подсказки:** у каждого игрока три счётчика по 1. `HINT <kind>` → если остаток
+  0 → `ERROR`; если **прошлым ходом того же игрока была подсказка** →
+  `ERROR` «Подсказку нельзя использовать два хода подряд», то есть между двумя
+  подсказками нужен обычный вопрос или догадка. Иначе вызвать соответствующую
+  `gamecore::hint*` на `candidates[player]` с `excluded` = уже заданным вопросам.
+  Если `question == -1` → `ERROR` «Нет информативного вопроса» (подсказка не
   тратится). Иначе вычесть подсказку, применить вопрос как обычный (ответ+фильтр),
-  вернуть `answer` с `hint:{kind,metric}` + `hint_status`.
-- **Угадывание:** `guess(characterId)` → сравнить с `secret[opponent]`. Верно →
-  `matchover(winner, characterId, character)` обоим. Неверно → `guess_result(false)`
-  угадавшему + смена хода.
+  вернуть `ANSWER` с видом подсказки и metric, затем `HINTS`.
+- **Угадывание:** `GUESS <characterId>` → сравнить с `secret[opponent]`. Верно →
+  `OVER <winner> <characterId>` обоим. Неверно → `WRONG` угадавшему + смена хода.
 - **Валидация:** `questionId` вне 0..138, `characterId` вне 0..59, не тот ход,
-  повторный вопрос → `error`, соединение не рвать.
+  повторный вопрос → `ERROR`, соединение не рвать.
 - **Отключения:** `disconnected` в любом состоянии → другому
-  `opponent_disconnected`, закрыть оба сокета, вернуть лобби к исходному
+  `OPPONENT_LEFT`, закрыть оба сокета, вернуть лобби к исходному
   (оба слота свободны, секреты/кандидаты сброшены).
-- **Повтор (rematch):** в MATCHOVER запомнить, кто прислал `rematch`; когда оба —
+- **Повтор (rematch):** в MATCHOVER запомнить, кто прислал `REMATCH`; когда оба —
   сбросить секреты/кандидаты/подсказки и перейти в WAITING_SECRETS (перезагадывание).
 
 ---
@@ -412,17 +402,17 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 - `QLineEdit hostField` (из env, раздел 9), `QSpinBox portField` (1–65535, из env),
   `QPushButton connectButton`.
 
-**Экран «Выбор персонажа» (после `welcome`, состояние WAITING_OPPONENT):**
+**Экран «Выбор персонажа» (после `WELCOME`, состояние WAITING_OPPONENT):**
 - `QLineEdit searchField` + `QListWidget characterList` (60 имён из
   `gamecore::characterNames()`, с фильтром по строке поиска).
-- `QPushButton confirmSecretButton` — шлёт `set_secret`. После выбора кнопка
+- `QPushButton confirmSecretButton` — шлёт `SECRET`. После выбора кнопка
   блокируется, статус «Ожидание второго игрока…».
 
-**Экран «Игра» (после `start`):**
+**Экран «Игра» (после `START`):**
 - `QLabel mySecretLabel` — «Ваш персонаж: N»: напоминает игроку его собственный
   секрет. Сервер свой секрет обратно не присылает, поэтому клиент запоминает
-  выбор при `set_secret` и держит подпись всю партию (сбрасывается при новом
-  выборе после `welcome`/реванша).
+  выбор при `SECRET` и держит подпись всю партию (сбрасывается при новом
+  выборе после `WELCOME`/реванша).
 - `QLabel statusLabel` — «Ваш ход» / «Ход соперника» / «Ожидание ответа…».
 - `QLabel candidatesLabel` — «Кандидатов: N».
 - `QLabel hintsLabel` — остаток подсказок (или отдельные кнопки с цифрами).
@@ -436,7 +426,7 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
     подсказок подряд (после подсказки до обычного вопроса/догадки).
   - `QPushButton tableButton` («Открыть таблицу») → диалог со списком текущих
     (уже отфильтрованных сервером) кандидатов и кнопкой «Удалить выбранных»
-    (шлёт `remove`) — для ручной подстраховки.
+    (шлёт `REMOVE`) — для ручной подстраховки.
   - `QPushButton guessButton` («Угадать») → диалог-выбор из текущих кандидатов.
 
 **Состояния и блокировки:**
@@ -451,11 +441,11 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 | OPPONENT_TURN | заблокированы | скрыт | заблокированы | скрыты |
 | MATCHOVER | заблокированы | скрыт | скрыты | скрыты |
 
-- `answer` → обновить `logText`, `candidatesLabel`; если `answer.hint` не null —
+- `ANSWER` → обновить `logText`, `candidatesLabel`; если пришёл вид подсказки —
   обновить `hintsLabel`.
-- `matchover` → показать победителя и загаданного персонажа; кнопка «Реванш»
-  (шлёт `rematch`) и «Выход».
-- `opponent_disconnected` / `error` → `statusLabel`, разблокировать экран подключения.
+- `OVER` → показать победителя и загаданного персонажа; кнопка «Реванш»
+  (шлёт `REMATCH`) и «Выход».
+- `OPPONENT_LEFT` / `ERROR` → `statusLabel`, разблокировать экран подключения.
 
 ---
 
@@ -500,15 +490,11 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 
 | # | Тест | Вход | Ожидаемый результат |
 |---|---|---|---|
-| 15 | `parse_set_secret` | `{"type":"set_secret","characterId":7}` | тип `set_secret`, `characterId==7` |
-| 16 | `parse_question` | `{"type":"question","questionId":12}` | тип `question`, `questionId==12` |
-| 17 | `parse_hint` | `{"type":"hint","kind":"catboost"}` | тип `hint`, `kind==catboost` |
-| 18 | `parse_hint_invalid` | `{"type":"hint","kind":"bogus"}` | корректная ошибка, не падает |
-| 19 | `parse_guess` | `{"type":"guess","characterId":24}` | тип `guess`, `characterId==24` |
-| 20 | `serialize_answer` | собрать `answer` (id, "yes", 31, null) | JSON содержит все поля с верными значениями |
-| 21 | `serialize_matchover` | собрать `matchover` (2, 24, "Monkey D. Luffy") | JSON содержит все поля |
-| 22 | `framing_two` | строка с двумя JSON через `\n` | 2 отдельных сообщения в правильном порядке |
-| 23 | `parse_unknown_type` | `{"type":"bogus"}` | ошибка «неизвестный тип», не падает |
+| 15 | `parseLine` | `"ASK 12"`, `"  TABLE  "`, `""` | `["ASK","12"]`, `["TABLE"]`, пустой список |
+| 16 | `readInt` | `"REMOVE 3 17 42"` | 3 читается; `"REMOVE"` и отсутствующий аргумент — нет |
+| 17 | `makeLine` | команды `START`, `ANSWER`, `ERROR` с текстом | строки с `\n`, аргументы через пробел |
+| 18 | `takeLines` | буфер с 3 строками, CRLF и пустой строкой | 3 строки, буфер пуст |
+| 19 | `partialLine` | `"ASK 5"` без `\n`, затем с `\n` | сначала пусто, после `\n` — одна строка |
 ---
 
 ## 11. Пошаговый план (11 задач)
@@ -521,11 +507,11 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 - Готово, если: `cmake -S . -B build` и `cmake --build build` без ошибок; exe в `build/bin`.
 - Проверка: `cmake -S . -B build && cmake --build build`.
 
-**Задача 2. Данные gamecore (генератор + доступ)**
+**Задача 2. Данные gamecore (единый источник + доступ)**
 - Цель: вшитые данные 60×139 и функции доступа к ним.
-- Файлы: `tools/generate_data.py`, `gamecore/generated/data.h`, `gamecore/generated/data.cpp`, `gamecore/include/gamecore/export.h`, `gamecore/gamecore.h`, `gamecore/src/gamecore.cpp` (частично), правка `gamecore/CMakeLists.txt`.
-- Готово, если: скрипт читает `data/selected_characters.csv` и генерирует `data.{h,cpp}` (имена/тексты/матрица); библиотека собирается и экспортирует `characterNames/questionTexts/matrix/value`.
-- Проверка: `python3 tools/generate_data.py` (без ошибок, файлы созданы) → `cmake --build build`.
+- Файлы: `gamecore/src/data.h`, `gamecore/include/gamecore/export.h`, `gamecore/include/gamecore/gamecore.h`, `gamecore/src/gamecore.cpp` (частично), правка `gamecore/CMakeLists.txt`.
+- Готово, если: `data.h` содержит имена/тексты/матрицу, библиотека собирается и экспортирует `characterNames/questionTexts/matrix/value`.
+- Проверка: `cmake --build build`.
 
 **Задача 3. gamecore: filterCandidates + hintVariance**
 - Цель: базовая фильтрация и подсказка по дисперсии.
@@ -545,28 +531,28 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 - Готово, если: `ctest` зелёный.
 - Проверка: `cmake --build build && ctest --test-dir build --output-on-failure`.
 
-**Задача 6. akinator_protocol (STATIC) + тесты**
-- Цель: NDJSON (де)сериализация всех сообщений раздела 6.
-- Файлы: `common/protocol.h`, `common/protocol.cpp`, правка `common/CMakeLists.txt`, `tests/tst_protocol.cpp`, правка `tests/CMakeLists.txt`.
-- Готово, если: тесты 15–23 зелёные.
+**Задача 6. akinator_protocol (INTERFACE) + тесты**
+- Цель: разбор и сборка текстовых команд раздела 6.
+- Файлы: `common/protocol.h`, правка `common/CMakeLists.txt`, `tests/tst_protocol.cpp`, правка `tests/CMakeLists.txt`.
+- Готово, если: тесты 15–19 зелёные.
 - Проверка: `cmake --build build && ctest --test-dir build --output-on-failure`.
 
-**Задача 7. Сервер: listen + env + лобби + set_secret**
+**Задача 7. Сервер: listen + env + лобби + SECRET**
 - Цель: принимать 2 клиентов, собирать секреты, отклонять третьего.
 - Файлы: `server/server.h`, `server/server.cpp`, `server/main.cpp`, правка `server/CMakeLists.txt`.
-- Готово, если: сервер слушает порт из `GAME_SERVER_PORT`; два клиента получают `welcome`, после двух `set_secret` — `start`; третий получает `error`.
-- Проверка: запуск сервера + ручная проверка `welcome/start/error` через `nc`/telnet (слать NDJSON).
+- Готово, если: сервер слушает порт из `GAME_SERVER_PORT`; два клиента получают `WELCOME`, после двух `SECRET` — `START`; третий получает `ERROR`.
+- Проверка: запуск сервера + ручная проверка `WELCOME/START/ERROR` через `nc`/telnet (слать текстовые команды).
 
 **Задача 8. Сервер: вопросы/подсказки/кандидаты/угадывание/победа + отключения**
 - Цель: полный игровой цикл по разделу 7.
 - Файлы: `server/server.cpp`, `server/server.h`.
-- Готово, если: `question`/`hint` → `answer`+`opponent_asked`+смена хода; `guess` → `guess_result`/`matchover`; `get_candidates`/`remove`; отключение → `opponent_disconnected`; `rematch` → сброс.
+- Готово, если: `ASK`/`HINT` → `ANSWER`+`OPPONENT`+смена хода; `GUESS` → `WRONG`/`OVER`; `TABLE`/`REMOVE`; отключение → `OPPONENT_LEFT`; `REMATCH` → сброс.
 - Проверка: ручной тест двумя `nc`-сессиями по протоколу раздела 6 (полный матч до угадывания).
 
 **Задача 9. Клиент: GUI + env + выбор персонажа**
 - Цель: окна подключения и выбора секрета; чтение env.
 - Файлы: `client/main.cpp`, `client/mainwindow.h/.cpp`, `client/connection.h/.cpp`, правка `client/CMakeLists.txt`.
-- Готово, если: окно открывается, host/port из env, список 60 персонажей с поиском, `set_secret` отправляется.
+- Готово, если: окно открывается, host/port из env, список 60 персонажей с поиском, `SECRET` отправляется.
 - Проверка: `cmake --build build`, запуск `akinator-client` против запущенного сервера.
 
 **Задача 10. Клиент: полный игровой цикл**
@@ -587,16 +573,16 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 1. `cmake -S . -B build && cmake --build build` — собирается на **Windows** и **Linux/macOS**.
 2. `ctest --test-dir build --output-on-failure` — все тесты зелёные (показать вывод).
 3. Показать, что `gamecore` — **SHARED**-библиотека (`.dll`/`.so`), реально используемая сервером/клиентом/тестами (там живут `filterCandidates` и 3 подсказки).
-4. Показать `tools/generate_data.py` → генерирует данные из `selected_characters.csv`.
+4. Показать `gamecore/src/data.h` → единственный источник данных 60×139 (без CSV/генератора).
 5. Запустить **сервер**: `GAME_SERVER_PORT=9999 ./akinator-server` (лог listen).
 6. Порт доступен извне (фаервол/проброс).
 7. **Windows**: `GAME_SERVER_HOST=<публичный_IP> GAME_SERVER_PORT=9999 akinator-client`.
 8. **Linux/macOS**: второй клиент с тем же адресом.
-9. Оба выбирают персонажей из 60 → `start` → ход 1; в игровой панели у каждого видна плашка «Ваш персонаж: имя» с его собственным секретом.
-10. Продемонстрировать: обычный вопрос → `answer` с уменьшившимся `remaining` (кандидаты отфильтрованы автоматически); «Открыть таблицу» + ручное удаление → `remove_ok` с новым `remaining`; **3 подсказки** (дисперсия, Random Forest, CatBoost) → лучший вопрос + автофильтрация; **вторая подсказка подряд** → `error` «Подсказку нельзя использовать два хода подряд»; угадывание → `matchover`.
+9. Оба выбирают персонажей из 60 → `START` → ход 1; в игровой панели у каждого видна плашка «Ваш персонаж: имя» с его собственным секретом.
+10. Продемонстрировать: обычный вопрос → `ANSWER` с уменьшившимся `remaining` (кандидаты отфильтрованы автоматически); «Открыть таблицу» + ручное удаление → `REMOVED` с новым `remaining`; **3 подсказки** (дисперсия, Random Forest, CatBoost) → лучший вопрос + автофильтрация; **вторая подсказка подряд** → `ERROR` «Подсказку нельзя использовать два хода подряд»; угадывание → `OVER`.
 11. Показать **env**: без переменных — дефолты; с `GAME_SERVER_HOST/PORT` — подключение к заданному адресу.
 12. (Опционально) разрыв: закрыть клиент → второй видит «Противник отключился».
-13. Показать отказ третьему игроку (`error` «Сервер занят»).
+13. Показать отказ третьему игроку (`ERROR` «Сервер занят»).
 
 ---
 
@@ -605,7 +591,7 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 1. **Название и суть** — «Бой Акинаторов», 2 игрока, авторитетный сервер + 2 GUI-клиента.
 2. **Требования** — Qt 6.5+, CMake ≥ 3.16, компилятор C++17.
 3. **Сборка** — `cmake -S . -B build`, `cmake --build build`.
-4. **Генерация данных** — `python3 tools/generate_data.py` (результат уже закоммичен).
+4. **Данные** — `gamecore/src/data.h` (единственный источник, без CSV/генератора).
 5. **Тесты** — `ctest --test-dir build --output-on-failure`.
 6. **Запуск сервера** — команда + env `GAME_SERVER_PORT`.
 7. **Запуск клиента** — команда + env `GAME_SERVER_HOST`/`GAME_SERVER_PORT` + поля GUI.
@@ -625,7 +611,7 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 - **Не реализовывать** NAT traversal, UPnP, STUN/TURN, peer-to-peer, relay.
 - **Не подключать** сторонние библиотеки (Boost, nlohmann/json, libcatboost, сокеты не из Qt) — только Qt6 + STL.
 - **Не добавлять** лишние Qt-модули (QML, Multimedia, WebEngine) — только Core/Network/Widgets/Test.
-- **Не использовать** Python в рантайме (только офлайн-генератор `tools/generate_data.py`).
+- **Не использовать** Python и внешние генераторы — данные уже в `gamecore/src/data.h`.
 - **Не менять** формат данных (`1`=да, `-1`=нет) и количество персонажей/вопросов (60/139).
 - **Не менять** публичный API `gamecore` (имена, сигнатуры, семантику `HintResult`).
 - **Не менять** имена env-переменных и дефолты.

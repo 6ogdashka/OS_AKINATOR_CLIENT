@@ -1,4 +1,3 @@
-// main.cpp — точка входа сервера. Порт берётся из GAME_SERVER_PORT (по умолчанию 9999).
 #include <QCoreApplication>
 #include <QDebug>
 #include <QString>
@@ -6,7 +5,6 @@
 #include "server.h"
 
 namespace {
-
 constexpr int kDefaultPort = 9999;
 
 quint16 resolvePort()
@@ -23,8 +21,7 @@ quint16 resolvePort()
     }
     return static_cast<quint16>(port);
 }
-
-} // namespace
+}
 
 int main(int argc, char* argv[])
 {

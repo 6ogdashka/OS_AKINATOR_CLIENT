@@ -1,5 +1,3 @@
-// main.cpp — точка входа GUI-клиента. Host/port предзаполняются из env
-// (GAME_SERVER_HOST / GAME_SERVER_PORT), но приоритет у полей в окне.
 #include <QApplication>
 #include <QDebug>
 #include <QFile>
@@ -10,11 +8,8 @@
 #include "mainwindow.h"
 
 namespace {
-
 constexpr int kDefaultPort = 9999;
 
-// Тема оформления лежит в ресурсах (client/resources.qrc) — один файл на весь
-// клиент, чтобы вид не зависел от платформы и рабочего каталога.
 void applyTheme(QApplication& app)
 {
     QFile styleFile(QStringLiteral(":/style.qss"));
@@ -25,15 +20,13 @@ void applyTheme(QApplication& app)
     }
     app.setWindowIcon(QIcon(QStringLiteral(":/assets/state_idle.png")));
 }
-
-} // namespace
+}
 
 int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("akinator-client"));
 
-    // Fusion рисует одинаково на Windows/macOS/Linux — важно для QSS-темы.
     QApplication::setStyle(QStringLiteral("Fusion"));
     applyTheme(app);
 
