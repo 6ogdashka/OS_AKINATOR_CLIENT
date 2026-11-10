@@ -63,18 +63,13 @@ void setErrorStyle(QLabel* label, bool error)
 QString connectionErrorMessage(const QString& raw, const QString& endpoint)
 {
     if (raw.contains(QStringLiteral("refused"), Qt::CaseInsensitive)) {
-        return QStringLiteral("%1 — по адресу %2 никто не принимает подключения.\n"
-                              "Проверьте: сервер запущен; в поле адрес машины с "
-                              "сервером (127.0.0.1 — это ваш же компьютер; при игре "
-                              "через ZeroTier/Tailscale — адрес сервера в этой сети); "
-                              "порт совпадает с GAME_SERVER_PORT на сервере.")
+        return QStringLiteral("%1 — по адресу %2 никто не принимает подключения. "
+                              "Проверьте адрес, порт и что сервер запущен.")
             .arg(raw, endpoint);
     }
     if (raw.contains(QStringLiteral("timed out"), Qt::CaseInsensitive)
         || raw.contains(QStringLiteral("unreachable"), Qt::CaseInsensitive)) {
-        return QStringLiteral("%1 — %2 не отвечает.\n"
-                              "Проверьте адрес и сеть: машина с сервером доступна "
-                              "(ping), порт открыт в фаерволе (9999/tcp).")
+        return QStringLiteral("%1 — %2 не отвечает. Проверьте сеть и фаервол.")
             .arg(raw, endpoint);
     }
     return raw;
@@ -456,10 +451,12 @@ QWidget* MainWindow::buildGamePage()
     layout->addLayout(right, 1);
 
     connect(askButton_, &QPushButton::clicked, this, &MainWindow::onAskClicked);
-    connect(hintVarianceButton_, &QPushButton::clicked, this, &MainWindow::onVarianceClicked);
+    connect(hintVarianceButton_, &QPushButton::clicked, this,
+            [this] { requestHint(QStringLiteral("variance")); });
     connect(hintRandomForestButton_, &QPushButton::clicked, this,
-            &MainWindow::onRandomForestClicked);
-    connect(hintCatBoostButton_, &QPushButton::clicked, this, &MainWindow::onCatBoostClicked);
+            [this] { requestHint(QStringLiteral("randomforest")); });
+    connect(hintCatBoostButton_, &QPushButton::clicked, this,
+            [this] { requestHint(QStringLiteral("catboost")); });
     connect(tableButton_, &QPushButton::clicked, this, &MainWindow::onTableClicked);
     connect(guessButton_, &QPushButton::clicked, this, &MainWindow::onGuessClicked);
     connect(rematchButton_, &QPushButton::clicked, this, &MainWindow::onRematchClicked);
@@ -730,16 +727,14 @@ void MainWindow::onAnswer(int questionId, const QString& answer, int remaining,
     const QString answerTextValue = answerText(answer);
 
     if (!hintKind.isEmpty()) {
-        appendLog(QStringLiteral("Подсказка «%1» (metric %2): «%3» → %4. "
-                                 "Сервер убрал неподходящих, в таблице %5. Следующая "
-                                 "подсказка — только после обычного вопроса.")
+        appendLog(QStringLiteral("Подсказка «%1» (metric %2): «%3» → %4. Осталось %5. "
+                                 "Следующая подсказка — после обычного вопроса.")
                       .arg(hintKind)
                       .arg(hintMetric, 0, 'f', 3)
                       .arg(question, answerTextValue)
                       .arg(remaining));
     } else {
-        appendLog(QStringLiteral("Вы спросили «%1» → %2. Сервер убрал неподходящих, "
-                                 "в таблице %3 кандидатов.")
+        appendLog(QStringLiteral("Вы спросили «%1» → %2. Осталось %3 кандидатов.")
                       .arg(question, answerTextValue)
                       .arg(remaining));
     }
@@ -803,15 +798,8 @@ void MainWindow::onMatchOver(int winner, int characterId)
     lastMatchWon_ = won;
     const QString character = characterName(characterId);
 
-    if (won) {
-        appendLog(QStringLiteral("Победа! Соперник загадал «%1» (#%2).")
-                      .arg(character)
-                      .arg(characterId));
-    } else {
-        appendLog(QStringLiteral("Поражение: соперник угадал «%1» (#%2).")
-                      .arg(character)
-                      .arg(characterId));
-    }
+    appendLog(won ? QStringLiteral("Победа! Соперник загадал «%1».").arg(character)
+                  : QStringLiteral("Поражение: соперник угадал «%1».").arg(character));
 
     applyState(UiState::MatchOver);
     statusLabel_->setText(won
@@ -850,26 +838,28 @@ void MainWindow::onOpponentDisconnected(const QString& text)
     statusLabel_->setText(QStringLiteral("Противник отключился"));
 }
 
-int MainWindow::askQuestionDialog()
+int MainWindow::pickItemDialog(const QString& title, const QString& okText,
+                               const QList<QPair<QString, int>>& items)
 {
+    if (items.isEmpty()) {
+        return -1;
+    }
+
     QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Задать вопрос"));
-    dialog.resize(560, 520);
+    dialog.setWindowTitle(title);
+    dialog.resize(440, 520);
 
     auto* search = new QLineEdit(&dialog);
-    search->setPlaceholderText(QStringLiteral("Поиск вопроса…"));
+    search->setPlaceholderText(QStringLiteral("Поиск…"));
 
     auto* list = new QListWidget(&dialog);
-    for (int id = 0; id < gamecore::kQuestionCount; ++id) {
-        if (askedQuestions_.contains(id)) {
-            continue;
-        }
-        auto* item = new QListWidgetItem(questionText(id), list);
+    for (const auto& [text, id] : items) {
+        auto* item = new QListWidgetItem(text, list);
         item->setData(Qt::UserRole, id);
     }
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Спросить"));
+    buttons->button(QDialogButtonBox::Ok)->setText(okText);
     buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
 
     auto* layout = new QVBoxLayout(&dialog);
@@ -884,16 +874,38 @@ int MainWindow::askQuestionDialog()
     connect(list, &QListWidget::itemDoubleClicked, &dialog,
             [&dialog](QListWidgetItem*) { dialog.accept(); });
 
-    if (list->count() > 0) {
-        list->setCurrentRow(0);
-    }
-
+    list->setCurrentRow(0);
     if (dialog.exec() != QDialog::Accepted) {
         return -1;
     }
     QListWidgetItem* item = list->currentItem();
     return item ? item->data(Qt::UserRole).toInt() : -1;
 }
+
+int MainWindow::askQuestionDialog()
+{
+    QList<QPair<QString, int>> items;
+    for (int id = 0; id < gamecore::kQuestionCount; ++id) {
+        if (!askedQuestions_.contains(id)) {
+            items.append({questionText(id), id});
+        }
+    }
+    return pickItemDialog(QStringLiteral("Задать вопрос"), QStringLiteral("Спросить"), items);
+}
+
+int MainWindow::guessDialog(const QList<int>& characterIds)
+{
+    QList<QPair<QString, int>> items;
+    for (int id : characterIds) {
+        items.append({characterName(id), id});
+    }
+    if (items.isEmpty()) {
+        appendLog(QStringLiteral("Список кандидатов пуст — угадывать некого."));
+        return -1;
+    }
+    return pickItemDialog(QStringLiteral("Угадать персонажа"), QStringLiteral("Угадать"), items);
+}
+
 
 void MainWindow::openTableDialog(const QList<int>& characterIds)
 {
@@ -951,53 +963,6 @@ void MainWindow::openTableDialog(const QList<int>& characterIds)
     dialog.exec();
 }
 
-int MainWindow::guessDialog(const QList<int>& characterIds)
-{
-    if (characterIds.isEmpty()) {
-        appendLog(QStringLiteral("Список кандидатов пуст — угадывать некого."));
-        return -1;
-    }
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Угадать персонажа"));
-    dialog.resize(440, 520);
-
-    auto* search = new QLineEdit(&dialog);
-    search->setPlaceholderText(QStringLiteral("Поиск…"));
-
-    auto* list = new QListWidget(&dialog);
-    for (int id : characterIds) {
-        auto* item = new QListWidgetItem(characterName(id), list);
-        item->setData(Qt::UserRole, id);
-    }
-
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Угадать"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
-
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(search);
-    layout->addWidget(list, 1);
-    layout->addWidget(buttons);
-
-    connect(search, &QLineEdit::textChanged, &dialog,
-            [list](const QString& text) { filterList(list, text); });
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    connect(list, &QListWidget::itemDoubleClicked, &dialog,
-            [&dialog](QListWidgetItem*) { dialog.accept(); });
-
-    if (list->count() > 0) {
-        list->setCurrentRow(0);
-    }
-
-    if (dialog.exec() != QDialog::Accepted) {
-        return -1;
-    }
-    QListWidgetItem* item = list->currentItem();
-    return item ? item->data(Qt::UserRole).toInt() : -1;
-}
-
 void MainWindow::onAskClicked()
 {
     if (state_ != UiState::MyTurn || waitingAnswer_) {
@@ -1010,21 +975,6 @@ void MainWindow::onAskClicked()
     connection_->send(QStringLiteral("ASK"), {QString::number(questionId)});
     waitingAnswer_ = true;
     applyState(UiState::WaitResult);
-}
-
-void MainWindow::onVarianceClicked()
-{
-    requestHint(QStringLiteral("variance"));
-}
-
-void MainWindow::onRandomForestClicked()
-{
-    requestHint(QStringLiteral("randomforest"));
-}
-
-void MainWindow::onCatBoostClicked()
-{
-    requestHint(QStringLiteral("catboost"));
 }
 
 void MainWindow::requestHint(const QString& kind)

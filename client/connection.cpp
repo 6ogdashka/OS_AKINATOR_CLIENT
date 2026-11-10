@@ -62,13 +62,11 @@ void Connection::onDisconnected()
 
 void Connection::onSocketError()
 {
-    if (socket_.state() == QAbstractSocket::ConnectedState) {
-        qWarning().noquote() << QStringLiteral("Сетевая ошибка: %1").arg(socket_.errorString());
-        return;
+    if (socket_.state() != QAbstractSocket::ConnectedState) {
+        qWarning().noquote() << QStringLiteral("Ошибка подключения: %1").arg(socket_.errorString());
+        emit errorOccurred(socket_.errorString());
+        emit connectionClosed();
     }
-    qWarning().noquote() << QStringLiteral("Ошибка подключения: %1").arg(socket_.errorString());
-    emit errorOccurred(socket_.errorString());
-    emit connectionClosed();
 }
 
 void Connection::onReadyRead()

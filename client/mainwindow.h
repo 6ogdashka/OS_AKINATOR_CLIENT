@@ -2,6 +2,7 @@
 
 #include <QList>
 #include <QMainWindow>
+#include <QPair>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -34,9 +35,6 @@ private slots:
     void onSecretSearchChanged(const QString& text);
     void onConfirmSecretClicked();
     void onAskClicked();
-    void onVarianceClicked();
-    void onRandomForestClicked();
-    void onCatBoostClicked();
     void onTableClicked();
     void onGuessClicked();
     void onRematchClicked();
@@ -86,6 +84,8 @@ private:
     void onOpponentDisconnected(const QString& text);
 
     void requestHint(const QString& kind);
+    int pickItemDialog(const QString& title, const QString& okText,
+                       const QList<QPair<QString, int>>& items);
     int askQuestionDialog();
     void openTableDialog(const QList<int>& characterIds);
     int guessDialog(const QList<int>& characterIds);
