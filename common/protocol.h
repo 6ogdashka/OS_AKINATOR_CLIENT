@@ -13,19 +13,14 @@ inline QStringList takeLines(QByteArray* buffer)
     if (!buffer) {
         return lines;
     }
-
     int start = 0;
-    int index = 0;
-    while ((index = buffer->indexOf('\n', start)) >= 0) {
-        QString line = QString::fromUtf8(buffer->mid(start, index - start)).trimmed();
-        start = index + 1;
+    for (int index; (index = buffer->indexOf('\n', start)) >= 0; start = index + 1) {
+        const QString line = QString::fromUtf8(buffer->mid(start, index - start)).trimmed();
         if (!line.isEmpty()) {
-            lines.append(line);
+            lines << line;
         }
     }
-    if (start > 0) {
-        buffer->remove(0, start);
-    }
+    buffer->remove(0, start);
     return lines;
 }
 
@@ -36,18 +31,12 @@ inline QStringList parseLine(const QString& line)
 
 inline bool readInt(const QStringList& parts, int index, int* out)
 {
-    if (index < 0 || index >= parts.size()) {
-        return false;
-    }
     bool ok = false;
-    const int value = parts.at(index).toInt(&ok);
-    if (!ok) {
-        return false;
-    }
-    if (out) {
+    const int value = (index >= 0 && index < parts.size()) ? parts.at(index).toInt(&ok) : 0;
+    if (ok && out) {
         *out = value;
     }
-    return true;
+    return ok;
 }
 
 inline QByteArray makeLine(const QStringList& parts)

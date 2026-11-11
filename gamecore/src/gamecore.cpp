@@ -2,36 +2,27 @@
 
 #include "data.h"
 
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QProcess>
+
 #include <algorithm>
-#include <cmath>
-#include <cstddef>
-#include <numeric>
-#include <random>
-#include <vector>
 
 namespace gamecore {
 namespace {
-constexpr std::size_t kCell(CharacterId character, QuestionId question) {
-    return static_cast<std::size_t>(character) * static_cast<std::size_t>(kQuestionCount)
-         + static_cast<std::size_t>(question);
+constexpr std::size_t cell(int character, int question)
+{
+    return static_cast<std::size_t>(character) * kQuestionCount + question;
 }
-
-bool validCharacter(CharacterId id) { return id >= 0 && id < kCharacterCount; }
-bool validQuestion(QuestionId id) { return id >= 0 && id < kQuestionCount; }
-
-bool answeredYes(CharacterId character, QuestionId question) {
-    return data::kMatrix[kCell(character, question)] > 0;
-}
-
-bool isExcluded(const std::vector<QuestionId>& excluded, QuestionId question) {
-    return std::find(excluded.begin(), excluded.end(), question) != excluded.end();
-}
-
-CandidateSet normalized(const CandidateSet& candidates) {
+CandidateSet normalized(const CandidateSet& candidates)
+{
     CandidateSet out;
-    out.reserve(candidates.size());
     for (CharacterId id : candidates) {
-        if (validCharacter(id)) {
+        if (id >= 0 && id < kCharacterCount) {
             out.push_back(id);
         }
     }
@@ -40,391 +31,225 @@ CandidateSet normalized(const CandidateSet& candidates) {
     return out;
 }
 
-std::vector<QuestionId> availableQuestions(const std::vector<QuestionId>& excluded) {
-    std::vector<QuestionId> questions;
-    questions.reserve(kQuestionCount);
-    for (QuestionId q = 0; q < kQuestionCount; ++q) {
-        if (!isExcluded(excluded, q)) {
-            questions.push_back(q);
-        }
+// Persistent Python worker: real variance / Random Forest / CatBoost hints.
+class HintEngine
+{
+public:
+    static HintEngine& instance()
+    {
+        static HintEngine engine;
+        return engine;
     }
-    return questions;
-}
+    ~HintEngine() { stop(); }
 
-HintResult bestByImportance(const std::vector<double>& importance,
-                            const std::vector<QuestionId>& questions) {
-    HintResult best;
-    for (QuestionId q : questions) {
-        if (importance[static_cast<std::size_t>(q)] > best.score) {
-            best.question = q;
-            best.score = importance[static_cast<std::size_t>(q)];
+    HintResult query(const QString& kind, const CandidateSet& candidates,
+                     const std::vector<QuestionId>& excluded)
+    {
+        if (disabled_ || !ensureStarted()) {
+            return {};
         }
-    }
-    return best;
-}
+        QJsonObject request;
+        request[QStringLiteral("cmd")] = QStringLiteral("hint");
+        request[QStringLiteral("kind")] = kind;
+        QJsonArray ids;
+        for (CharacterId id : candidates) {
+            ids.append(id);
+        }
+        QJsonArray questions;
+        for (QuestionId question : excluded) {
+            questions.append(question);
+        }
+        request[QStringLiteral("candidates")] = ids;
+        request[QStringLiteral("excluded")] = questions;
 
-std::vector<int> popularityLabels(const CandidateSet& candidates, bool* usable) {
-    const std::size_t n = candidates.size();
-    std::vector<int> counts(n, 0);
-    for (std::size_t i = 0; i < n; ++i) {
-        int yes = 0;
-        for (QuestionId q = 0; q < kQuestionCount; ++q) {
-            if (answeredYes(candidates[i], q)) {
-                ++yes;
+        QJsonObject response;
+        if (!exchange(request, &response)) {
+            stop();
+            return {};
+        }
+        return {response.value(QStringLiteral("question")).toInt(-1),
+                response.value(QStringLiteral("score")).toDouble(0.0)};
+    }
+
+private:
+    bool ensureStarted()
+    {
+        if (initialized_ && process_.state() == QProcess::Running) {
+            return true;
+        }
+        return start();
+    }
+    static QString scriptPath()
+    {
+        const QString configured = qEnvironmentVariable("AKINATOR_ML_SCRIPT");
+        if (!configured.isEmpty()) {
+            return configured;
+        }
+        if (QCoreApplication::instance()) {
+            const QString beside =
+                QCoreApplication::applicationDirPath() + QStringLiteral("/ml_hints.py");
+            if (QFileInfo::exists(beside)) {
+                return beside;
             }
         }
-        counts[i] = yes;
+#ifdef AKINATOR_ML_SCRIPT_PATH
+        const QString source = QStringLiteral(AKINATOR_ML_SCRIPT_PATH);
+        if (QFileInfo::exists(source)) {
+            return source;
+        }
+#endif
+        return QStringLiteral("gamecore/ml_hints.py");
     }
-
-    std::vector<int> sorted(counts);
-    std::sort(sorted.begin(), sorted.end());
-    const int median = sorted[n / 2];
-
-    std::vector<int> labels(n, 0);
-    int positives = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        labels[i] = counts[i] > median ? 1 : 0;
-        positives += labels[i];
+    bool start()
+    {
+        stop();
+        const QString script = scriptPath();
+        if (!QFileInfo::exists(script)) {
+            disabled_ = true;
+            return false;
+        }
+        QString python = qEnvironmentVariable("AKINATOR_PYTHON");
+        if (python.isEmpty()) {
+#ifdef Q_OS_WIN
+            python = QStringLiteral("python");
+#else
+            python = QStringLiteral("python3");
+#endif
+        }
+        process_.setProgram(python);
+        process_.setArguments({QStringLiteral("-u"), script, QStringLiteral("--serve")});
+        process_.start();
+        if (!process_.waitForStarted(10000)) {
+            disabled_ = true;
+            stop();
+            return false;
+        }
+        QJsonObject init;
+        init[QStringLiteral("cmd")] = QStringLiteral("init");
+        QJsonArray matrix;
+        for (std::int8_t value : data::kMatrix) {
+            matrix.append(static_cast<int>(value));
+        }
+        init[QStringLiteral("matrix")] = matrix;
+        QJsonObject response;
+        if (!exchange(init, &response) || !response.value(QStringLiteral("ok")).toBool()) {
+            disabled_ = true;
+            stop();
+            return false;
+        }
+        initialized_ = true;
+        return true;
     }
-    *usable = positives > 0 && positives < static_cast<int>(n);
-    return labels;
-}
-
-double giniImpurity(std::size_t positives, std::size_t total) {
-    if (total == 0) {
-        return 0.0;
+    void stop()
+    {
+        initialized_ = false;
+        buffer_.clear();
+        if (process_.state() != QProcess::NotRunning) {
+            process_.kill();
+            process_.waitForFinished(2000);
+        }
     }
-    const double p = static_cast<double>(positives) / static_cast<double>(total);
-    return 2.0 * p * (1.0 - p);
-}
-
-void rfGrow(const CandidateSet& candidates,
-            const std::vector<int>& labels,
-            const std::vector<std::size_t>& node,
-            int depth,
-            const std::vector<QuestionId>& features,
-            std::size_t mtry,
-            std::vector<double>& importance,
-            std::mt19937& rng) {
-    constexpr int kMaxDepth = 3;
-    const std::size_t total = node.size();
-    if (total < 2 || depth >= kMaxDepth) {
-        return;
+    bool exchange(const QJsonObject& request, QJsonObject* response)
+    {
+        if (process_.state() != QProcess::Running) {
+            return false;
+        }
+        const QByteArray payload = QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n';
+        if (process_.write(payload) != payload.size()) {
+            return false;
+        }
+        if (!process_.waitForBytesWritten(5000)) {
+            return false;
+        }
+        QByteArray line;
+        if (!readLine(&line, 20000)) {
+            return false;
+        }
+        const QJsonDocument document = QJsonDocument::fromJson(line);
+        if (!document.isObject()) {
+            return false;
+        }
+        *response = document.object();
+        return !response->contains(QStringLiteral("error"));
     }
-
-    std::size_t positives = 0;
-    for (std::size_t pos : node) {
-        positives += static_cast<std::size_t>(labels[pos]);
-    }
-    if (positives == 0 || positives == total) {
-        return;
-    }
-
-    const double parentImpurity = giniImpurity(positives, total);
-
-    std::vector<QuestionId> subset(features);
-    const std::size_t take = std::min(mtry, subset.size());
-    for (std::size_t i = 0; i < take; ++i) {
-        std::uniform_int_distribution<std::size_t> pick(i, subset.size() - 1);
-        std::swap(subset[i], subset[pick(rng)]);
-    }
-    subset.resize(take);
-
-    QuestionId bestFeature = -1;
-    double bestGain = 0.0;
-    std::size_t bestYes = 0;
-
-    for (QuestionId q : subset) {
-        std::size_t yes = 0;
-        std::size_t yesPositives = 0;
-        for (std::size_t pos : node) {
-            if (answeredYes(candidates[pos], q)) {
-                ++yes;
-                yesPositives += static_cast<std::size_t>(labels[pos]);
+    bool readLine(QByteArray* line, int timeoutMs)
+    {
+        QElapsedTimer timer;
+        timer.start();
+        for (;;) {
+            const int newline = buffer_.indexOf('\n');
+            if (newline >= 0) {
+                *line = buffer_.left(newline);
+                buffer_.remove(0, newline + 1);
+                return true;
             }
-        }
-        if (yes == 0 || yes == total) {
-            continue;
-        }
-        const std::size_t no = total - yes;
-        const std::size_t noPositives = positives - yesPositives;
-        const double gain = parentImpurity
-            - (static_cast<double>(yes) / static_cast<double>(total))
-                  * giniImpurity(yesPositives, yes)
-            - (static_cast<double>(no) / static_cast<double>(total))
-                  * giniImpurity(noPositives, no);
-        if (gain > bestGain) {
-            bestGain = gain;
-            bestFeature = q;
-            bestYes = yes;
-        }
-    }
-
-    if (bestFeature < 0) {
-        return;
-    }
-
-    importance[static_cast<std::size_t>(bestFeature)] += bestGain * static_cast<double>(total);
-
-    std::vector<std::size_t> yesNode;
-    std::vector<std::size_t> noNode;
-    yesNode.reserve(bestYes);
-    noNode.reserve(total - bestYes);
-    for (std::size_t pos : node) {
-        if (answeredYes(candidates[pos], bestFeature)) {
-            yesNode.push_back(pos);
-        } else {
-            noNode.push_back(pos);
-        }
-    }
-
-    rfGrow(candidates, labels, yesNode, depth + 1, features, mtry, importance, rng);
-    rfGrow(candidates, labels, noNode, depth + 1, features, mtry, importance, rng);
-}
-
-double sigmoid(double x) {
-    if (x >= 0.0) {
-        const double e = std::exp(-x);
-        return 1.0 / (1.0 + e);
-    }
-    const double e = std::exp(x);
-    return e / (1.0 + e);
-}
-
-void catGrow(const CandidateSet& candidates,
-             const std::vector<double>& gradient,
-             const std::vector<double>& hessian,
-             const std::vector<std::size_t>& node,
-             int depth,
-             const std::vector<QuestionId>& features,
-             double lambda,
-             double learningRate,
-             std::vector<double>& raw,
-             std::vector<double>& importance) {
-    constexpr int kMaxDepth = 2;
-
-    double totalG = 0.0;
-    double totalH = 0.0;
-    for (std::size_t pos : node) {
-        totalG += gradient[pos];
-        totalH += hessian[pos];
-    }
-
-    if (node.size() < 2 || depth >= kMaxDepth || totalH <= 1e-12) {
-        if (totalH > 1e-12) {
-            const double leaf = -learningRate * totalG / (totalH + lambda);
-            for (std::size_t pos : node) {
-                raw[pos] += leaf;
+            const int remaining = timeoutMs - static_cast<int>(timer.elapsed());
+            if (remaining <= 0 || !process_.waitForReadyRead(remaining)) {
+                return false;
             }
-        }
-        return;
-    }
-
-    const double base = totalG * totalG / (totalH + lambda);
-    QuestionId bestFeature = -1;
-    double bestGain = 0.0;
-
-    for (QuestionId q : features) {
-        double yesG = 0.0;
-        double yesH = 0.0;
-        std::size_t yes = 0;
-        for (std::size_t pos : node) {
-            if (answeredYes(candidates[pos], q)) {
-                yesG += gradient[pos];
-                yesH += hessian[pos];
-                ++yes;
-            }
-        }
-        if (yes == 0 || yes == node.size()) {
-            continue;
-        }
-        const double noG = totalG - yesG;
-        const double noH = totalH - yesH;
-        const double gain = yesG * yesG / (yesH + lambda)
-                          + noG * noG / (noH + lambda)
-                          - base;
-        if (gain > bestGain) {
-            bestGain = gain;
-            bestFeature = q;
+            buffer_.append(process_.readAllStandardOutput());
         }
     }
 
-    if (bestFeature < 0 || bestGain <= 1e-12) {
-        if (totalH > 1e-12) {
-            const double leaf = -learningRate * totalG / (totalH + lambda);
-            for (std::size_t pos : node) {
-                raw[pos] += leaf;
-            }
-        }
-        return;
-    }
+    QProcess process_;
+    QByteArray buffer_;
+    bool initialized_ = false;
+    bool disabled_ = false;
+};
 
-    importance[static_cast<std::size_t>(bestFeature)] += bestGain;
-
-    std::vector<std::size_t> yesNode;
-    std::vector<std::size_t> noNode;
-    for (std::size_t pos : node) {
-        if (answeredYes(candidates[pos], bestFeature)) {
-            yesNode.push_back(pos);
-        } else {
-            noNode.push_back(pos);
-        }
+HintResult pythonHint(const char* kind, const CandidateSet& candidates,
+                      const std::vector<QuestionId>& excluded)
+{
+    const CandidateSet set = normalized(candidates);
+    if (set.size() < 2) {
+        return {};
     }
-    catGrow(candidates, gradient, hessian, yesNode, depth + 1, features, lambda,
-            learningRate, raw, importance);
-    catGrow(candidates, gradient, hessian, noNode, depth + 1, features, lambda,
-            learningRate, raw, importance);
+    return HintEngine::instance().query(QString::fromLatin1(kind), set, excluded);
 }
-}
+} // namespace
 
 const std::vector<std::string>& characterNames() { return data::kCharacterNames; }
-
 const std::vector<std::string>& questionTexts() { return data::kQuestionTexts; }
-
 const std::vector<std::int8_t>& matrix() { return data::kMatrix; }
 
-int value(CharacterId character, QuestionId question) {
-    if (!validCharacter(character) || !validQuestion(question)) {
+int value(CharacterId character, QuestionId question)
+{
+    if (character < 0 || character >= kCharacterCount || question < 0
+        || question >= kQuestionCount) {
         return 0;
     }
-    return static_cast<int>(data::kMatrix[kCell(character, question)]);
+    return data::kMatrix[cell(character, question)];
 }
 
-CandidateSet filterCandidates(const CandidateSet& candidates, QuestionId question,
-                              Answer answer) {
+CandidateSet filterCandidates(const CandidateSet& candidates, QuestionId question, Answer answer)
+{
     const CandidateSet source = normalized(candidates);
-    if (!validQuestion(question) || (answer != 1 && answer != -1)) {
+    if (question < 0 || question >= kQuestionCount || (answer != 1 && answer != -1)) {
         return source;
     }
-
     CandidateSet result;
-    result.reserve(source.size());
-    for (CharacterId character : source) {
-        if (value(character, question) == answer) {
-            result.push_back(character);
+    for (CharacterId id : source) {
+        if (value(id, question) == answer) {
+            result.push_back(id);
         }
     }
     return result;
 }
 
-HintResult hintVariance(const CandidateSet& candidates,
-                        const std::vector<QuestionId>& excluded) {
-    const CandidateSet remaining = normalized(candidates);
-    if (remaining.size() < 2) {
-        return {};
-    }
-
-    const double total = static_cast<double>(remaining.size());
-    HintResult best;
-    for (QuestionId q = 0; q < kQuestionCount; ++q) {
-        if (isExcluded(excluded, q)) {
-            continue;
-        }
-        std::size_t yes = 0;
-        for (CharacterId character : remaining) {
-            if (answeredYes(character, q)) {
-                ++yes;
-            }
-        }
-        const double p = static_cast<double>(yes) / total;
-        const double score = 4.0 * p * (1.0 - p);
-        if (score > best.score) {
-            best.score = score;
-            best.question = q;
-        }
-    }
-    return best;
+HintResult hintVariance(const CandidateSet& candidates, const std::vector<QuestionId>& excludedList)
+{
+    return pythonHint("variance", candidates, excludedList);
 }
 
 HintResult hintRandomForest(const CandidateSet& candidates,
-                            const std::vector<QuestionId>& excluded) {
-    const CandidateSet remaining = normalized(candidates);
-    if (remaining.size() < 2) {
-        return {};
-    }
-    const std::vector<QuestionId> features = availableQuestions(excluded);
-    if (features.empty()) {
-        return {};
-    }
-
-    bool usable = false;
-    const std::vector<int> labels = popularityLabels(remaining, &usable);
-    if (!usable) {
-        return hintVariance(remaining, excluded);
-    }
-
-    std::vector<double> importance(kQuestionCount, 0.0);
-    std::mt19937 rng(0x5EED1234u);
-    constexpr int kTrees = 40;
-    const std::size_t mtry = std::max<std::size_t>(2, features.size() / 3);
-    std::uniform_int_distribution<std::size_t> pick(0, remaining.size() - 1);
-
-    for (int tree = 0; tree < kTrees; ++tree) {
-        std::vector<std::size_t> sample;
-        sample.reserve(remaining.size());
-        for (std::size_t i = 0; i < remaining.size(); ++i) {
-            sample.push_back(pick(rng));
-        }
-        rfGrow(remaining, labels, sample, 0, features, mtry, importance, rng);
-    }
-
-    const HintResult best = bestByImportance(importance, features);
-    if (best.question < 0) {
-        return hintVariance(remaining, excluded);
-    }
-    return best;
+                            const std::vector<QuestionId>& excludedList)
+{
+    return pythonHint("randomforest", candidates, excludedList);
 }
 
 HintResult hintCatBoost(const CandidateSet& candidates,
-                        const std::vector<QuestionId>& excluded) {
-    const CandidateSet remaining = normalized(candidates);
-    if (remaining.size() < 2) {
-        return {};
-    }
-    const std::vector<QuestionId> features = availableQuestions(excluded);
-    if (features.empty()) {
-        return {};
-    }
-
-    bool usable = false;
-    const std::vector<int> labels = popularityLabels(remaining, &usable);
-    if (!usable) {
-        return hintVariance(remaining, excluded);
-    }
-
-    const std::size_t n = remaining.size();
-    int positives = 0;
-    for (int label : labels) {
-        positives += label;
-    }
-    const double baseRate = static_cast<double>(positives) / static_cast<double>(n);
-    const double baseScore = std::log(baseRate / (1.0 - baseRate));
-
-    constexpr int kRounds = 30;
-    constexpr double kLearningRate = 0.25;
-    constexpr double kLambda = 1.0;
-
-    std::vector<double> raw(n, baseScore);
-    std::vector<double> gradient(n, 0.0);
-    std::vector<double> hessian(n, 0.0);
-    std::vector<double> importance(kQuestionCount, 0.0);
-    std::vector<std::size_t> node(n);
-    std::iota(node.begin(), node.end(), std::size_t{0});
-
-    for (int round = 0; round < kRounds; ++round) {
-        for (std::size_t i = 0; i < n; ++i) {
-            const double p = sigmoid(raw[i]);
-            gradient[i] = p - static_cast<double>(labels[i]);
-            hessian[i] = p * (1.0 - p);
-        }
-        catGrow(remaining, gradient, hessian, node, 0, features, kLambda,
-                kLearningRate, raw, importance);
-    }
-
-    const HintResult best = bestByImportance(importance, features);
-    if (best.question < 0) {
-        return hintVariance(remaining, excluded);
-    }
-    return best;
+                        const std::vector<QuestionId>& excludedList)
+{
+    return pythonHint("catboost", candidates, excludedList);
 }
-}
+} // namespace gamecore

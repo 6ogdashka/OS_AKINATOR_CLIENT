@@ -8,7 +8,6 @@
 #include <QStringList>
 
 class Connection;
-
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -20,55 +19,32 @@ class QStackedWidget;
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
-
 public:
     explicit MainWindow(Connection* connection, const QString& host, int port,
                         const QString& envWarning, QWidget* parent = nullptr);
-    ~MainWindow() override;
-
+    ~MainWindow() override = default;
 private slots:
     void onConnectClicked();
     void onConnectionClosed();
-
     void onMessage(const QStringList& parts);
-
-    void onSecretSearchChanged(const QString& text);
     void onConfirmSecretClicked();
     void onAskClicked();
-    void onTableClicked();
-    void onGuessClicked();
     void onRematchClicked();
     void onLeaveClicked();
-
 private:
-    enum class UiState {
-        Disconnected,
-        Connecting,
-        WaitingOpponent,
-        MyTurn,
-        WaitResult,
-        OpponentTurn,
-        MatchOver
-    };
-
+    enum class UiState { Disconnected, Connecting, WaitingOpponent, MyTurn, WaitResult,
+                         OpponentTurn, MatchOver };
     enum class PendingRequest { None, Table, Guess };
-
     void buildUi();
     QWidget* buildConnectPage();
     QWidget* buildSecretPage();
     QWidget* buildGamePage();
-
     void applyState(UiState state);
-    void resetGameData();
+    void resetGameData(bool keepSecret = false);
     void appendLog(const QString& text);
     void updateCandidatesLabel();
     void updateHintsLabel();
-
     void updateMySecretLabel();
-    void updateTurnStatus();
-
-    void updateStateImage();
-
     void onWelcome(int player);
     void onStart();
     void onTurnChanged(int player);
@@ -82,32 +58,27 @@ private:
     void onMatchOver(int winner, int characterId);
     void onServerError(const QString& text);
     void onOpponentDisconnected(const QString& text);
-
+    void requestCandidates(PendingRequest pending);
     void requestHint(const QString& kind);
     int pickItemDialog(const QString& title, const QString& okText,
                        const QList<QPair<QString, int>>& items);
     int askQuestionDialog();
     void openTableDialog(const QList<int>& characterIds);
     int guessDialog(const QList<int>& characterIds);
-
     static QString characterName(int id);
     static QString questionText(int id);
     static QString answerText(const QString& answer);
 
     Connection* connection_ = nullptr;
-
     QStackedWidget* stack_ = nullptr;
-
     QLineEdit* hostField_ = nullptr;
     QSpinBox* portField_ = nullptr;
     QPushButton* connectButton_ = nullptr;
     QLabel* connectStatusLabel_ = nullptr;
-
     QLineEdit* searchField_ = nullptr;
     QListWidget* characterList_ = nullptr;
     QPushButton* confirmSecretButton_ = nullptr;
     QLabel* secretStatusLabel_ = nullptr;
-
     QLabel* statusLabel_ = nullptr;
     QLabel* mySecretLabel_ = nullptr;
     QLabel* candidatesLabel_ = nullptr;
@@ -122,14 +93,10 @@ private:
     QPushButton* guessButton_ = nullptr;
     QPushButton* rematchButton_ = nullptr;
     QPushButton* leaveButton_ = nullptr;
-
     UiState state_ = UiState::Disconnected;
     PendingRequest pending_ = PendingRequest::None;
     int localPlayer_ = 0;
-
     int mySecretId_ = -1;
-    bool waitingAnswer_ = false;
-
     bool hintUsedLastTurn_ = false;
     bool lastMatchWon_ = false;
     int candidatesCount_ = 0;

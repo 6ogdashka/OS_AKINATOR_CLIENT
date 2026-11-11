@@ -6,6 +6,7 @@
 
 - Машина с Linux для сервера и 1–2 машины с Windows/Linux/macOS для клиентов.
 - Qt 6.5+ и Qt Creator (на Linux — ещё CMake и компилятор C++17).
+- Python 3.10+ и пакет `numpy` на машине сервера — для ML-подсказок.
 - ZeroTier на всех машинах — для игры через интернет без настройки роутера.
 
 ## 1. Скачать проект
@@ -32,12 +33,13 @@ cd OS_AKINATOR
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake qt6-base-dev qt6-base-dev-tools
+sudo apt install -y build-essential cmake qt6-base-dev qt6-base-dev-tools python3 python3-numpy
 cmake -S . -B build
 cmake --build build -j"$(nproc)"
 ```
 
-Файлы появятся в `build/bin`.
+Файлы появятся в `build/bin`. Если `python3-numpy` из apt недоступен:
+`python3 -m pip install -r gamecore/requirements.txt`.
 
 ## 3. ZeroTier: объединить машины в одну сеть
 

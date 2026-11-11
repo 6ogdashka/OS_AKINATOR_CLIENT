@@ -15,22 +15,11 @@
 
 class Server : public QObject
 {
-    Q_OBJECT
-
 public:
     explicit Server(QObject* parent = nullptr);
-    ~Server() override;
-
     bool start(quint16 port, const QHostAddress& address = QHostAddress::Any);
 
-private slots:
-    void onNewConnection();
-    void onReadyRead();
-    void onDisconnected();
-
 private:
-    enum class State { Lobby, WaitingSecrets, InGame, MatchOver };
-
     struct Player {
         QTcpSocket* socket = nullptr;
         QByteArray buffer;
@@ -39,30 +28,27 @@ private:
         gamecore::CharacterId secret = -1;
         gamecore::CandidateSet candidates;
         std::vector<int> asked;
-        int hintsVariance = 0;
-        int hintsRandomForest = 0;
-        int hintsCatBoost = 0;
-
+        std::array<int, 3> hints{};
         bool lastTurnWasHint = false;
         bool wantsRematch = false;
     };
 
     static constexpr int kPlayerCount = 2;
+    enum class State { Lobby, WaitingSecrets, InGame, MatchOver };
 
+    void onNewConnection();
+    void onReadyRead();
+    void onDisconnected();
     int slotOf(const QTcpSocket* socket) const;
-    static int opponentSlot(int slot);
-    bool bothConnected() const;
-
+    static int opponentSlot(int slot) { return slot == 0 ? 1 : 0; }
+    bool bothConnected() const { return players_[0].socket && players_[1].socket; }
     void send(int slot, const QStringList& parts);
     void broadcast(const QStringList& parts);
     void sendError(int slot, const QString& text);
     void sendHintStatus(int slot);
-
     void beginWaitingSecrets();
     void startMatch();
-    void clearSecrets();
     void maybeStartMatch();
-
     void handleMessage(int slot, const QStringList& parts);
     void handleSetSecret(int slot, int characterId);
     void handleQuestion(int slot, int questionId);
@@ -72,11 +58,9 @@ private:
     void handleGuess(int slot, int characterId);
     void handleRematch(int slot);
     void handleLeave(int slot);
-
     bool ensureInGame(int slot);
     bool ensureTurn(int slot);
     bool isAsked(int slot, int questionId) const;
-
     void applyQuestion(int slot, int questionId, const QString& hintKind, double metric);
     void switchTurn();
     void dropLobby(int closingSlot);

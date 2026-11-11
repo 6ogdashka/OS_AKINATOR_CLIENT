@@ -1,4 +1,5 @@
 build/
+build-*/
 *.user
 CMakeCache.txt
 CMakeFiles/
@@ -13,3 +14,5 @@ compile_commands.json
 *.obj
 .idea/
 .vscode/
+__pycache__/
+*.pyc

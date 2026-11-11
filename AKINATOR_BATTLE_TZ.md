@@ -32,10 +32,14 @@
   Клиент только отображает.
   Обоснование: данные детерминированы —
   ответ всегда известен, нет рассинхрона и читерства.
-- Подсказки (дисперсия / Random Forest / CatBoost) — три детерминированных
-  in-memory алгоритма на чистом C++ внутри `gamecore` (без Python и libcatboost).
-  Обоснование: таблица маленькая и фиксированная, ноль внешних ML-зависимостей,
-  самодостаточная SHARED-библиотека.
+- Подсказки (дисперсия / Random Forest / CatBoost) реализованы в Python-модуле
+  `gamecore/ml_hints.py` (Python 3 + numpy): настоящие алгоритмы — максимум
+  дисперсии, Random Forest (бэггинг + случайные подмножества признаков +
+  Gini-важность) и градиентный бустинг CatBoost-стиля (oblivious-деревья,
+  logloss, L2). `gamecore` держит один постоянный Python-процесс (`QProcess`,
+  обмен JSON-строками) и вызывает его из `hintVariance/hintRandomForest/hintCatBoost`.
+  Обоснование: полноценные ML-алгоритмы, а не эвристики «для вида»; таблица
+  маленькая, поэтому подсказка считается за десятки миллисекунд.
 - Протокол — текстовые команды: одна строка UTF-8, аргументы через пробел,
   разделитель `\n`.
 - Свой секрет сервер не возвращает (это тайна от соперника), поэтому клиент
@@ -43,17 +47,23 @@
   «Ваш персонаж: N» всю партию — чтобы не забыть, кого загадал.
 - Персонажи и вопросы передаются по сети индексами (`characterId` 0..59,
   `questionId` 0..138); тексты/имена стороны берут локально из `gamecore`.
-- Версии: Qt 6.5+, CMake ≥ 3.16, C++17.
-- Публичный доступ к серверу (VPS/проброс порта) — вне проекта; никакого NAT
-  traversal и P2P.
+- Версии: Qt 6.5+, CMake ≥ 3.16, C++17, Python 3.10+ с numpy (для подсказок).
+- Публичный доступ — через ZeroTier; собственный NAT traversal/P2P/relay не реализуется.
 - Один матч одновременно; третий подключившийся отклоняется.
 
 **Риски (и как закрываем):**
-- In-memory RF/бустинг может быть капризным → фиксированные seed и глубина дают
-  детерминизм (тесты раздела 10 проверяют детерминированность и валидность).
+- Python-воркер может отсутствовать/упасть → `gamecore` запускает его лениво,
+  один раз перезапускает при сбое, использует таймауты и при ошибке возвращает
+  `question=-1` (подсказка не тратится). Фиксированные seed и гиперпараметры
+  дают детерминизм; тесты раздела 10 проверяют валидность и детерминированность.
+- Нет Python 3 или numpy → подсказки недоступны (`ERROR` «Нет информативного
+  вопроса»), остальная игра работает. Зависимость ставится из
+  `gamecore/requirements.txt`.
 - Файрвол/NAT публичного сервера — не решается кодом (чек-лист раздела 12).
 - Разрыв соединения — `OPPONENT_LEFT` + сброс лобби (раздел 7).
 - Windows не находит `gamecore.dll` — единая папка вывода бинарников (раздел 4).
+- `ml_hints.py` не оказался рядом с бинарниками — CMake копирует его POST_BUILD;
+  путь к Python/скрипту переопределяется `AKINATOR_PYTHON`/`AKINATOR_ML_SCRIPT`.
 - Русский текст — файлы в UTF-8, строки через `u8"..."`.
 
 ---
@@ -61,16 +71,20 @@
 ## 2. Архитектура и потоки данных
 
 ```
-[Клиент A: Windows]                     [Сервер: Linux/VPS]                        [Клиент B: Linux/macOS]
+[Клиент A: Windows]                     [Сервер: Linux + ZeroTier]                  [Клиент B: Linux/macOS]
  QtWidgets (GUI)                        QTcpServer (listen)                         QtWidgets (GUI)
  QTcpSocket ──TCP (текст)──►  accept ◄──  секреты + кандидаты обоих  ──►  accept ◄──TCP (текст)── QTcpSocket
  protocol.h (текст)                        gamecore: matrix/filter/3 подсказки          protocol.h (текст)
  gamecore (имена/вопросы/данные)           protocol.h (текст)                           gamecore (имена/вопросы/данные)
+                                           gamecore ──QProcess/JSON──► ml_hints.py
+                                           (Python 3 + numpy: RF / CatBoost / variance)
 ```
 
 **Роли целей:**
-- `gamecore` (SHARED, чистый C++) — данные (имена/тексты/матрица), `filterCandidates`,
-  три подсказки. Используют **сервер, клиент, тесты**.
+- `gamecore` (SHARED, C++ + Qt6::Core) — данные (имена/тексты/матрица),
+  `filterCandidates` и C++-обёртки подсказок. Сами подсказки считает постоянный
+  Python-воркер `gamecore/ml_hints.py` (numpy), запускаемый через `QProcess`.
+  Используют **сервер, клиент, тесты**.
 - `akinator_protocol` (INTERFACE, header-only) — разбор и сборка текстовых строк.
   Используют **сервер, клиент, тесты**.
 - `akinator-server` (EXE) — авторитетный сервер.
@@ -96,17 +110,19 @@
 
 ```
 akinator-battle/
-├── CMakeLists.txt              # корневой: проект, C++17, find_package(Qt6), enable_testing(), единая папка bin/
+├── CMakeLists.txt              # корневой: C++17, опции client/server/tests, find_package(Qt6), единая папка bin/
 ├── README.md                   # описание, сборка, запуск, env, демо (структура — раздел 13)
 ├── .gitignore                  # build/, *.user, CMakeCache.txt
 │
-├── gamecore/                   # Динамическая библиотека (SHARED), без Qt
-│   ├── CMakeLists.txt          # add_library(gamecore SHARED ...), GAMECORE_BUILD
+├── gamecore/                   # SHARED-библиотека (Qt6::Core только для QProcess)
+│   ├── CMakeLists.txt          # add_library(gamecore SHARED ...), GAMECORE_BUILD, Qt6::Core, копирование ml_hints.py
+│   ├── requirements.txt        # numpy>=1.24
+│   ├── ml_hints.py             # Python-воркер: variance / Random Forest / CatBoost (JSON-lines)
 │   ├── include/gamecore/
 │   │   ├── export.h            # макрос GAMECORE_EXPORT (dllimport/dllexport / visibility)
 │   │   └── gamecore.h          # типы, данные, filterCandidates, HintResult, 3 подсказки
 │   └── src/
-│       ├── gamecore.cpp        # filterCandidates + hintVariance/RandomForest/CatBoost
+│       ├── gamecore.cpp        # filterCandidates + QProcess-мост к ml_hints.py
 │       └── data.h              # единственный источник данных: 60 имён, 139 текстов, матрица 60×139 (±1)
 │
 ├── common/                     # Header-only помощник протокола, использует Qt::Core
@@ -141,28 +157,32 @@ akinator-battle/
 - `cmake_minimum_required(VERSION 3.16)`
 - `project(akinator LANGUAGES CXX)`
 - `set(CMAKE_CXX_STANDARD 17)` + `set(CMAKE_CXX_STANDARD_REQUIRED ON)`
-- `find_package(Qt6 REQUIRED COMPONENTS Core Network Widgets Test)`
+- Опции: `AKINATOR_BUILD_CLIENT`, `AKINATOR_BUILD_SERVER`, `AKINATOR_BUILD_TESTS` (по умолчанию `ON`).
+- `find_package(Qt6 REQUIRED COMPONENTS Core Network)`, плюс `Widgets` только при клиенте и `Test` только при тестах.
 - **Единая папка вывода**: `set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)` (важно для Windows DLL).
-- `enable_testing()`
-- `add_subdirectory(gamecore)`, `add_subdirectory(common)`, `add_subdirectory(server)`, `add_subdirectory(client)`, `add_subdirectory(tests)`
+- `enable_testing()` только при `AKINATOR_BUILD_TESTS`.
+- `add_subdirectory(gamecore)`, `add_subdirectory(common)`, затем `server`/`client`/`tests` по опциям.
+- `client/CMakeLists.txt` и `server/CMakeLists.txt` — standalone-проекты: их можно открыть в Qt Creator напрямую.
 
 **Qt-компоненты (обязательные):**
 
 | Компонент | Кто использует | Зачем |
 |---|---|---|
-| `Core` | protocol, server, client, tests | `QString`, `QByteArray`, `QObject`, `QCoreApplication` |
+| `Core` | gamecore, protocol, server, client, tests | `QString`, `QByteArray`, `QObject`, `QCoreApplication`, `QProcess`, `QJson*` |
 | `Network` | server, client | `QTcpServer`, `QTcpSocket` |
 | `Widgets` | client | GUI |
 | `Test` | tests | `QTest` |
+
+**Python-зависимости подсказок:** Python 3.10+ и `numpy` (`gamecore/requirements.txt`). CMake не собирает Python-код, но POST_BUILD-командой копирует `ml_hints.py` в общую папку `bin/` рядом с бинарниками. Пути переопределяются переменными `AKINATOR_PYTHON` и `AKINATOR_ML_SCRIPT`.
 
 **Цели и типы:**
 
 | Цель | Тип | Линкует | Примечание |
 |---|---|---|---|
-| `gamecore` | `SHARED` | (ничего) | `target_compile_definitions(gamecore PRIVATE GAMECORE_BUILD)`; `target_include_directories(gamecore PUBLIC include)` |
+| `gamecore` | `SHARED` | `Qt6::Core` | `GAMECORE_BUILD`, `AKINATOR_ML_SCRIPT_PATH`; POST_BUILD копирует `ml_hints.py` в `bin/`; `target_include_directories(gamecore PUBLIC include)` |
 | `akinator_protocol` | `INTERFACE` | `Qt6::Core` | `target_include_directories(akinator_protocol INTERFACE .)` |
 | `akinator-server` | EXE | `Qt6::Core`, `Qt6::Network`, `akinator_protocol`, `gamecore` | консольное |
-| `akinator-client` | EXE | `Qt6::Widgets`, `Qt6::Network`, `akinator_protocol`, `gamecore` | на MSVC можно `WIN32_EXECUTABLE TRUE` |
+| `akinator-client` | EXE | `Qt6::Widgets`, `Qt6::Network`, `akinator_protocol`, `gamecore` | standalone CMake для Qt Creator; на MSVC можно `WIN32_EXECUTABLE TRUE` |
 | `tst_gamecore` | EXE | `gamecore`, `Qt6::Test` | — |
 | `tst_protocol` | EXE | `akinator_protocol`, `Qt6::Core`, `Qt6::Test` | — |
 
@@ -171,6 +191,11 @@ akinator-battle/
 - `add_test(NAME tst_gamecore COMMAND tst_gamecore)` и `add_test(NAME tst_protocol COMMAND tst_protocol)`.
 - Запуск: `ctest --test-dir build --output-on-failure`.
 - Тесты находят `gamecore.dll` благодаря общей папке `bin/`.
+
+**Packaging-цели:**
+- `package-client` копирует клиент и runtime-библиотеку `gamecore` в `build/dist/client` (Python-воркер не копируется).
+- `package-server` копирует сервер, `gamecore`, `ml_hints.py` и `requirements.txt` в `build/dist/server`.
+- На Linux/macOS у клиента и сервера выставляется RPATH `$ORIGIN`/`@loader_path`, чтобы скопированная папка находила `gamecore` рядом с бинарником.
 ---
 
 ## 5. Публичный API `gamecore`
@@ -224,20 +249,21 @@ GAMECORE_EXPORT CandidateSet filterCandidates(const CandidateSet& candidates,
                                               QuestionId question, Answer answer);
 
 // --- Подсказки (лучший вопрос) ---
+// C++-обёртки: запрос уходит постоянному Python-воркеру gamecore/ml_hints.py.
 struct HintResult {
     QuestionId question = -1; // -1, если информативного вопроса нет
     double     score    = 0.0;
 };
 
-// Дисперсия: максимум 4p(1-p) по оставшимся кандидатам.
+// variance: максимум 4p(1-p) по оставшимся кандидатам.
 GAMECORE_EXPORT HintResult hintVariance(const CandidateSet& candidates,
                                         const std::vector<QuestionId>& excluded);
-// Random Forest: важность по усреднённому падению Gini-примеси
-// (ансамбль малых случайных деревьев, фиксированный seed).
+// Random Forest: 100 деревьев, bootstrap + случайные подмножества признаков,
+// важность по усреднённому падению Gini-примеси (фиксированный seed).
 GAMECORE_EXPORT HintResult hintRandomForest(const CandidateSet& candidates,
                                             const std::vector<QuestionId>& excluded);
-// CatBoost-подобный жадный градиентный бустинг: суммарный gain
-// (shallow-деревья, квадратичная аппроксимация logloss, фиксированный seed).
+// CatBoost-стиль: 100 раундов градиентного бустинга с oblivious-деревьями,
+// квадратичная аппроксимация logloss и L2-регуляризация (фиксированный seed).
 GAMECORE_EXPORT HintResult hintCatBoost(const CandidateSet& candidates,
                                         const std::vector<QuestionId>& excluded);
 
@@ -250,8 +276,21 @@ GAMECORE_EXPORT HintResult hintCatBoost(const CandidateSet& candidates,
 - `excluded` — уже заданные вопросы (исключаются из выбора; пустой вектор =
   ничего не исключено).
 - Подсказки **детерминированы**: одинаковые входы → одинаковый `HintResult`.
+- Подсказки требуют Python 3 + numpy; C++-обёртки запускают постоянный воркер
+  лениво (один процесс на приложение), обмен — JSON-строки `init`/`hint`,
+  таймаут запроса 20 с. При сбое воркер перезапускается; если он недоступен,
+  возвращается `{question = -1, score = 0}` и исключение не пробрасывается.
 - Если кандидатов < 2 или нет вопроса, который различает кандидатов и не входит
   в `excluded`, вернуть `{question = -1, score = 0}`.
+
+**5.1. Протокол `gamecore` ↔ `ml_hints.py`**
+
+- Запуск: `python3 -u ml_hints.py --serve` на Unix (`python -u ...` на Windows).
+- Инициализация (один раз): `{"cmd":"init","matrix":[8340 значений]}` → `{"ok":true}`.
+- Запрос подсказки: `{"cmd":"hint","kind":"variance|randomforest|catboost","candidates":[...],"excluded":[...]}` → `{"question":q,"score":s}`.
+- Ошибка Python → `{"error":"..."}`; C++-обёртка возвращает `{question=-1, score=0}`.
+- Параметры алгоритмов: Random Forest — 100 деревьев, глубина 4, min leaf 2, `mtry=max(2,√F)`, seed `0x5EED1234`; CatBoost-стиль — 100 раундов, глубина 3, min leaf 2, learning rate 0.15, L2=1.0, логистическая функция потерь; variance — точный максимум `4p(1-p)`.
+
 ---
 
 ## 6. Спецификация сетевого протокола (текстовые команды)
@@ -380,10 +419,12 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
   0 → `ERROR`; если **прошлым ходом того же игрока была подсказка** →
   `ERROR` «Подсказку нельзя использовать два хода подряд», то есть между двумя
   подсказками нужен обычный вопрос или догадка. Иначе вызвать соответствующую
-  `gamecore::hint*` на `candidates[player]` с `excluded` = уже заданным вопросам.
-  Если `question == -1` → `ERROR` «Нет информативного вопроса» (подсказка не
-  тратится). Иначе вычесть подсказку, применить вопрос как обычный (ответ+фильтр),
-  вернуть `ANSWER` с видом подсказки и metric, затем `HINTS`.
+  `gamecore::hint*` на `candidates[player]` с `excluded` = уже заданным вопросам;
+  C++-обёртка синхронно спрашивает Python-воркер `ml_hints.py` (JSON-lines) и
+  возвращает его `question/score`. Если `question == -1` → `ERROR` «Нет
+  информативного вопроса» (подсказка не тратится). Иначе вычесть подсказку,
+  применить вопрос как обычный (ответ+фильтр), вернуть `ANSWER` с видом подсказки
+  и metric, затем `HINTS`.
 - **Угадывание:** `GUESS <characterId>` → сравнить с `secret[opponent]`. Верно →
   `OVER <winner> <characterId>` обоим. Неверно → `WRONG` угадавшему + смена хода.
 - **Валидация:** `questionId` вне 0..138, `characterId` вне 0..59, не тот ход,
@@ -455,6 +496,8 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 |---|---|---|---|
 | `GAME_SERVER_HOST` | клиент | `127.0.0.1` | адрес сервера (предзаполняет поле host) |
 | `GAME_SERVER_PORT` | клиент и сервер | `9999` | порт (клиент — подключение, сервер — listen) |
+| `AKINATOR_PYTHON` | gamecore | `python3` (Unix) / `python` (Windows) | интерпретатор Python для ML-воркера подсказок |
+| `AKINATOR_ML_SCRIPT` | gamecore | `build/bin/ml_hints.py` | явный путь к `ml_hints.py` (иначе ищется рядом с бинарником / в исходниках) |
 
 - **Сервер** слушает на `0.0.0.0` (Any) и порту из `GAME_SERVER_PORT`.
 - **Клиент** использует значения полей GUI в момент «Подключиться»; поля
@@ -486,6 +529,10 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 | 13 | `catboost_deterministic` | два вызова с одинаковым входом | идентичные `HintResult` |
 | 14 | `hints_noInfo` | кандидаты с одинаковыми строками | все три подсказки возвращают `question==-1` |
 
+> Тесты подсказок (7–14) требуют `python3` и `numpy`: `gamecore` при первом
+> вызове `hint*` поднимает Python-воркер. Если Python/numpy недоступны, тесты
+> подсказок упадут; для CI зависимость обязательна (`gamecore/requirements.txt`).
+
 ### `tst_protocol.cpp`
 
 | # | Тест | Вход | Ожидаемый результат |
@@ -514,21 +561,21 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 - Проверка: `cmake --build build`.
 
 **Задача 3. gamecore: filterCandidates + hintVariance**
-- Цель: базовая фильтрация и подсказка по дисперсии.
-- Файлы: `gamecore/src/gamecore.cpp`, `gamecore/gamecore.h`.
-- Готово, если: `filterCandidates` и `hintVariance` работают по контракту раздела 5.
-- Проверка: `cmake --build build`.
+- Цель: базовая фильтрация в C++ и подсказка по дисперсии через Python-воркер.
+- Файлы: `gamecore/src/gamecore.cpp`, `gamecore/include/gamecore/gamecore.h`, `gamecore/ml_hints.py`, `gamecore/requirements.txt`, правка `gamecore/CMakeLists.txt`.
+- Готово, если: `filterCandidates` работает по контракту раздела 5, а `hintVariance` делегируется Python-воркеру и возвращает тот же вопрос, что brute-force.
+- Проверка: `cmake --build build` + `python3 -c "import numpy"`.
 
 **Задача 4. gamecore: hintRandomForest + hintCatBoost**
-- Цель: две ML-подсказки (in-memory, детерминированные).
-- Файлы: `gamecore/src/gamecore.cpp`, `gamecore/gamecore.h`.
-- Готово, если: обе функции возвращают валидный вопрос / `-1`, детерминированы.
+- Цель: две настоящие ML-подсказки в `ml_hints.py` (детерминированные).
+- Файлы: `gamecore/ml_hints.py`, `gamecore/src/gamecore.cpp` (обёртки), `gamecore/requirements.txt`.
+- Готово, если: Random Forest обучает 100 деревьев с bootstrap/mtry/Gini, CatBoost-стиль — 100 раундов oblivious-бустинга; обе функции возвращают валидный вопрос / `-1`, детерминированы.
 - Проверка: `cmake --build build`.
 
 **Задача 5. Тесты gamecore + ctest**
 - Цель: покрыть данные/filter/подсказки тестами 1–14.
 - Файлы: `tests/tst_gamecore.cpp`, правка `tests/CMakeLists.txt`.
-- Готово, если: `ctest` зелёный.
+- Готово, если: `ctest` зелёный (нужны Python 3 + numpy).
 - Проверка: `cmake --build build && ctest --test-dir build --output-on-failure`.
 
 **Задача 6. akinator_protocol (INTERFACE) + тесты**
@@ -572,11 +619,11 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 
 1. `cmake -S . -B build && cmake --build build` — собирается на **Windows** и **Linux/macOS**.
 2. `ctest --test-dir build --output-on-failure` — все тесты зелёные (показать вывод).
-3. Показать, что `gamecore` — **SHARED**-библиотека (`.dll`/`.so`), реально используемая сервером/клиентом/тестами (там живут `filterCandidates` и 3 подсказки).
+3. Показать, что `gamecore` — **SHARED**-библиотека (`.dll`/`.so`), реально используемая сервером/клиентом/тестами (там живут `filterCandidates` и C++-обёртки подсказок), а сами подсказки считает Python-воркер `ml_hints.py` (Random Forest / CatBoost / variance).
 4. Показать `gamecore/src/data.h` → единственный источник данных 60×139 (без CSV/генератора).
-5. Запустить **сервер**: `GAME_SERVER_PORT=9999 ./akinator-server` (лог listen).
+5. Проверить `python3 -c "import numpy"`, запустить **сервер**: `GAME_SERVER_PORT=9999 ./akinator-server` (лог listen).
 6. Порт доступен извне (фаервол/проброс).
-7. **Windows**: `GAME_SERVER_HOST=<публичный_IP> GAME_SERVER_PORT=9999 akinator-client`.
+7. **Windows**: `GAME_SERVER_HOST=<ZeroTier_IP> GAME_SERVER_PORT=9999 akinator-client`.
 8. **Linux/macOS**: второй клиент с тем же адресом.
 9. Оба выбирают персонажей из 60 → `START` → ход 1; в игровой панели у каждого видна плашка «Ваш персонаж: имя» с его собственным секретом.
 10. Продемонстрировать: обычный вопрос → `ANSWER` с уменьшившимся `remaining` (кандидаты отфильтрованы автоматически); «Открыть таблицу» + ручное удаление → `REMOVED` с новым `remaining`; **3 подсказки** (дисперсия, Random Forest, CatBoost) → лучший вопрос + автофильтрация; **вторая подсказка подряд** → `ERROR` «Подсказку нельзя использовать два хода подряд»; угадывание → `OVER`.
@@ -589,14 +636,14 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 ## 13. Структура README
 
 1. **Название и суть** — «Бой Акинаторов», 2 игрока, авторитетный сервер + 2 GUI-клиента.
-2. **Требования** — Qt 6.5+, CMake ≥ 3.16, компилятор C++17.
+2. **Требования** — Qt 6.5+, CMake ≥ 3.16, компилятор C++17, Python 3.10+ и numpy на сервере для подсказок.
 3. **Сборка** — `cmake -S . -B build`, `cmake --build build`.
 4. **Данные** — `gamecore/src/data.h` (единственный источник, без CSV/генератора).
 5. **Тесты** — `ctest --test-dir build --output-on-failure`.
 6. **Запуск сервера** — команда + env `GAME_SERVER_PORT`.
 7. **Запуск клиента** — команда + env `GAME_SERVER_HOST`/`GAME_SERVER_PORT` + поля GUI.
 8. **Как играть** — правила дуэли, вопросы, 3 подсказки, таблица кандидатов, угадывание.
-9. **Сетевой доступ** — VPS/проброс порта, что P2P не используется.
+9. **Сетевой доступ** — ZeroTier; P2P не используется.
 10. **Архитектура** — модули (`gamecore`, `akinator_protocol`, `server`, `client`, `tests`).
 11. **Протокол** — ссылка на раздел 6.
 12. **Демо-чек-лист** — копия раздела 12.
@@ -609,9 +656,9 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 - **Не менять архитектуру** (авторитетный TCP-сервер + 2 GUI-клиента, не P2P).
 - **Не добавлять** БД, файловое хранилище, auth, статистику.
 - **Не реализовывать** NAT traversal, UPnP, STUN/TURN, peer-to-peer, relay.
-- **Не подключать** сторонние библиотеки (Boost, nlohmann/json, libcatboost, сокеты не из Qt) — только Qt6 + STL.
+- **Не подключать** сторонние C++-библиотеки (Boost, nlohmann/json, libcatboost, сокеты не из Qt) — только Qt6 + STL.
 - **Не добавлять** лишние Qt-модули (QML, Multimedia, WebEngine) — только Core/Network/Widgets/Test.
-- **Не использовать** Python и внешние генераторы — данные уже в `gamecore/src/data.h`.
+- **Python разрешён только** для ML-подсказок (`gamecore/ml_hints.py`: Python 3 + numpy). Не использовать sklearn/libcatboost и не генерировать данные — данные уже в `gamecore/src/data.h`.
 - **Не менять** формат данных (`1`=да, `-1`=нет) и количество персонажей/вопросов (60/139).
 - **Не менять** публичный API `gamecore` (имена, сигнатуры, семантику `HintResult`).
 - **Не менять** имена env-переменных и дефолты.
@@ -625,7 +672,13 @@ OPPONENT_TURN: интерфейс хода заблокирован; опове�
 ## 15. Итоговая инструкция по выполнению
 
 Работай по разделу 11 строго последовательно. Начинай с **Задачи 1** сразу, без
-дополнительных вопросов. Когда все 11 задач выполнены, ещё раз прогони:
+дополнительных вопросов. Перед тестами подсказок установи Python-зависимости:
+
+```bash
+python3 -m pip install -r gamecore/requirements.txt
+```
+
+Когда все 11 задач выполнены, ещё раз прогони:
 
 ```bash
 cmake -S . -B build
